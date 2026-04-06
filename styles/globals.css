@@ -1,0 +1,177 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand: #6366f1;
+  --brand-dark: #4f46e5;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background-color: #09090b;
+  color: #fafafa;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  height: 100%;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #18181b;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Video player overlay gradient */
+.player-gradient-bottom {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.5) 40%, transparent 100%);
+}
+
+.player-gradient-top {
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.7) 0%, transparent 100%);
+}
+
+/* Progress bar */
+.progress-bar {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: height 0.15s ease;
+}
+
+.progress-bar:hover {
+  height: 6px;
+}
+
+.progress-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--brand);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
+}
+
+.progress-bar::-webkit-slider-runnable-track {
+  border-radius: 2px;
+}
+
+/* Volume slider */
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  width: 80px;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+}
+
+/* Glass morphism cards */
+.glass-card {
+  background: rgba(24, 24, 27, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+}
+
+/* Pulse animation for recording indicator */
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 1; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+.mic-pulse::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: pulse-ring 1.5s ease-out infinite;
+  z-index: -1;
+}
+
+/* Tooltip */
+.tooltip {
+  position: relative;
+}
+.tooltip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #27272a;
+  color: #fafafa;
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 3px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.tooltip:hover::after {
+  opacity: 1;
+}
+
+/* Buffering spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.buffering-spinner {
+  border: 3px solid rgba(255,255,255,0.15);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  width: 48px;
+  height: 48px;
+  animation: spin 0.8s linear infinite;
+}
+
+/* User badge */
+.badge-admin {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+.badge-user {
+  background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+}
+
+/* Input focus ring */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px #6366f1;
+}
+
+/* Transitions */
+.transition-controls {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}

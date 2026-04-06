@@ -1,0 +1,456 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { useRouter } from 'next/router';
+import Head from 'next/head';
+import Link from 'next/link';
+import { io, Socket } from 'socket.io-client';
+import VideoPlayer, { VideoPlayerHandle } from '@/components/VideoPlayer';
+
+interface Me {
+  id: number;
+  username: string;
+  role: 'admin' | 'user';
+  displayName: string | null;
+}
+
+interface ConnectedUser {
+  username: string;
+  role: string;
+  socketId: string;
+}
+
+interface SessionState {
+  videoUrl: string;
+  isPlaying: boolean;
+  currentTime: number;
+  timestamp: number;
+  users: ConnectedUser[];
+}
+
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ],
+};
+
+export default function WatchPage() {
+  const router = useRouter();
+  const [me, setMe] = useState<Me | null>(null);
+  const [videoUrl, setVideoUrl] = useState('');
+  const [connectedUsers, setConnectedUsers] = useState<ConnectedUser[]>([]);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('');
+  const [syncStatus, setSyncStatus] = useState('');
+
+  const playerRef = useRef<VideoPlayerHandle>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const peerConnsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) { router.push('/'); return; }
+        setMe(data);
+      })
+      .catch(() => router.push('/'));
+  }, [router]);
+
+  // ── Socket.io ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!me) return;
+
+    const socket = io({ transports: ['websocket', 'polling'] });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      socket.emit('auth', { username: me.username, role: me.role });
+    });
+
+    // Receive full session state (on join or URL change)
+    socket.on('session:state', (state: SessionState) => {
+      setVideoUrl(state.videoUrl);
+      setConnectedUsers(state.users);
+
+      if (me.role === 'user' && state.videoUrl) {
+        // Calculate adjusted time accounting for elapsed since last update
+        const elapsed = (Date.now() - state.timestamp) / 1000;
+        const targetTime = state.isPlaying ? state.currentTime + elapsed : state.currentTime;
+
+        setTimeout(() => {
+          const p = playerRef.current;
+          if (!p) return;
+          p.seek(targetTime);
+          if (state.isPlaying) {
+            p.play();
+          } else {
+            p.pause();
+          }
+          setSyncStatus('Synced');
+          setTimeout(() => setSyncStatus(''), 2000);
+        }, 800); // small delay to let video load
+      }
+    });
+
+    socket.on('room:users', (users: ConnectedUser[]) => {
+      setConnectedUsers(users);
+    });
+
+    // Admin → user video events
+    if (me.role === 'user') {
+      socket.on('video:play', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
+        const p = playerRef.current;
+        if (!p) return;
+        const elapsed = (Date.now() - timestamp) / 1000;
+        p.seek(currentTime + elapsed);
+        p.play();
+        setSyncStatus('▶ Play');
+        setTimeout(() => setSyncStatus(''), 1500);
+      });
+
+      socket.on('video:pause', ({ currentTime }: { currentTime: number }) => {
+        const p = playerRef.current;
+        if (!p) return;
+        p.seek(currentTime);
+        p.pause();
+        setSyncStatus('⏸ Pause');
+        setTimeout(() => setSyncStatus(''), 1500);
+      });
+
+      socket.on('video:seek', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
+        const p = playerRef.current;
+        if (!p) return;
+        const elapsed = (Date.now() - timestamp) / 1000;
+        p.seek(currentTime + elapsed * 0.5);
+        setSyncStatus('⏩ Seek');
+        setTimeout(() => setSyncStatus(''), 1500);
+      });
+    }
+
+    // WebRTC: new peer joined (call them)
+    socket.on('webrtc:peer-joined', async ({ peerId, username: peerName }: { peerId: string; username: string }) => {
+      setVoiceStatus(`${peerName} joined — connecting voice…`);
+      if (!localStreamRef.current) return;
+      const pc = createPeerConnection(peerId, socket);
+      peerConnsRef.current.set(peerId, pc);
+
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc:offer', { targetId: peerId, offer });
+      } catch (err) {
+        console.error('Offer error', err);
+      }
+    });
+
+    socket.on('webrtc:offer', async ({ fromId, offer }: { fromId: string; offer: RTCSessionDescriptionInit }) => {
+      if (!localStreamRef.current) {
+        try {
+          localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch { /* mic not available */ }
+      }
+      const pc = createPeerConnection(fromId, socket);
+      peerConnsRef.current.set(fromId, pc);
+
+      try {
+        await pc.setRemoteDescription(offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('webrtc:answer', { targetId: fromId, answer });
+      } catch (err) {
+        console.error('Answer error', err);
+      }
+    });
+
+    socket.on('webrtc:answer', async ({ fromId, answer }: { fromId: string; answer: RTCSessionDescriptionInit }) => {
+      const pc = peerConnsRef.current.get(fromId);
+      if (pc) {
+        try {
+          await pc.setRemoteDescription(answer);
+        } catch (err) {
+          console.error('Set answer error', err);
+        }
+      }
+    });
+
+    socket.on('webrtc:ice', async ({ fromId, candidate }: { fromId: string; candidate: RTCIceCandidateInit }) => {
+      const pc = peerConnsRef.current.get(fromId);
+      if (pc) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (err) {
+          console.error('ICE error', err);
+        }
+      }
+    });
+
+    socket.on('webrtc:peer-left', ({ peerId }: { peerId: string }) => {
+      const pc = peerConnsRef.current.get(peerId);
+      if (pc) { pc.close(); peerConnsRef.current.delete(peerId); }
+      setVoiceStatus('Peer disconnected');
+      setTimeout(() => setVoiceStatus(''), 2000);
+    });
+
+    // Admin heartbeat (periodic time sync for users)
+    if (me.role === 'admin') {
+      heartbeatRef.current = setInterval(() => {
+        const t = playerRef.current?.getCurrentTime() ?? 0;
+        socket.emit('video:heartbeat', { currentTime: t });
+      }, 5000);
+    }
+
+    return () => {
+      socket.disconnect();
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      peerConnsRef.current.forEach((pc) => pc.close());
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, [me]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── WebRTC helpers ────────────────────────────────────────────────────────
+  function createPeerConnection(peerId: string, socket: Socket): RTCPeerConnection {
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current!);
+      });
+    }
+
+    pc.ontrack = (event) => {
+      const audio = new Audio();
+      audio.srcObject = event.streams[0];
+      audio.autoplay = true;
+      audio.play().catch(console.error);
+      setVoiceStatus('Voice connected');
+      setTimeout(() => setVoiceStatus(''), 2000);
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('webrtc:ice', { targetId: peerId, candidate: event.candidate });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') {
+        setVoiceActive(true);
+        setVoiceStatus('');
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setVoiceActive(false);
+      }
+    };
+
+    return pc;
+  }
+
+  // ── Voice chat toggle ─────────────────────────────────────────────────────
+  const handleToggleMic = useCallback(async () => {
+    if (!voiceActive) {
+      // Start voice chat
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        localStreamRef.current = stream;
+        setVoiceActive(true);
+        setVoiceStatus('Mic on — waiting for other party…');
+
+        // Add tracks to existing peer connections
+        peerConnsRef.current.forEach((pc) => {
+          stream.getTracks().forEach((track) => {
+            pc.addTrack(track, stream);
+          });
+        });
+      } catch (err) {
+        setVoiceStatus('Microphone access denied');
+        setTimeout(() => setVoiceStatus(''), 3000);
+      }
+    } else if (micMuted) {
+      // Unmute
+      localStreamRef.current?.getTracks().forEach((t) => { t.enabled = true; });
+      setMicMuted(false);
+    } else {
+      // Mute
+      localStreamRef.current?.getTracks().forEach((t) => { t.enabled = false; });
+      setMicMuted(true);
+    }
+  }, [voiceActive, micMuted]);
+
+  // ── Admin video event emitters ────────────────────────────────────────────
+  const handlePlay = useCallback((currentTime: number) => {
+    socketRef.current?.emit('video:play', { currentTime });
+  }, []);
+
+  const handlePause = useCallback((currentTime: number) => {
+    socketRef.current?.emit('video:pause', { currentTime });
+  }, []);
+
+  const handleSeek = useCallback((currentTime: number) => {
+    socketRef.current?.emit('video:seek', { currentTime });
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/');
+  };
+
+  if (!me) {
+    return (
+      <div className="min-h-screen bg-surface-950 flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <Head>
+        <title>CinemaSync — Watch</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#09090b" />
+      </Head>
+
+      <div className="min-h-screen bg-surface-950 flex flex-col">
+        {/* Top bar */}
+        <header className="flex-shrink-0 border-b border-surface-800/60 bg-surface-900/70 backdrop-blur z-50">
+          <div className="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-6 h-6 rounded-md bg-brand-500 flex items-center justify-center flex-shrink-0">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="white">
+                  <path d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18c.62-.39.62-1.29 0-1.69L9.54 5.98C8.87 5.55 8 6.03 8 6.82z" />
+                </svg>
+              </div>
+              <span className="font-bold text-white text-sm">CinemaSync</span>
+              <span
+                className={`text-xs font-semibold px-2 py-0.5 rounded-full text-white ${me.role === 'admin' ? 'badge-admin' : 'badge-user'}`}
+              >
+                {me.role === 'admin' ? '⚡ ADMIN' : '👁 VIEWER'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-3 text-xs">
+              {/* Sync status */}
+              {syncStatus && (
+                <span className="text-brand-400 font-medium animate-fade-in">{syncStatus}</span>
+              )}
+              {/* Voice status */}
+              {voiceStatus && (
+                <span className="text-green-400 font-medium animate-fade-in">{voiceStatus}</span>
+              )}
+
+              {/* Online indicator */}
+              <div className="flex items-center gap-1.5 bg-surface-800 rounded-full px-2.5 py-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse-slow" />
+                <span className="text-surface-300">
+                  {connectedUsers.length} online
+                </span>
+              </div>
+
+              {/* Admin link */}
+              {me.role === 'admin' && (
+                <Link href="/admin">
+                  <span className="text-surface-400 hover:text-white transition-colors cursor-pointer">
+                    Dashboard
+                  </span>
+                </Link>
+              )}
+
+              <button
+                onClick={handleLogout}
+                className="text-surface-500 hover:text-white transition-colors"
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Main content */}
+        <main className="flex-1 flex flex-col items-center justify-center px-2 py-4 sm:px-4">
+          {/* Video container */}
+          <div className="w-full max-w-5xl">
+            <VideoPlayer
+              ref={playerRef}
+              src={videoUrl}
+              isAdmin={me.role === 'admin'}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onSeek={handleSeek}
+              connectedUsers={connectedUsers}
+              voiceActive={voiceActive}
+              isMuted={micMuted}
+              onToggleMic={handleToggleMic}
+            />
+          </div>
+
+          {/* Info row */}
+          <div className="w-full max-w-5xl mt-4 flex flex-wrap items-center justify-between gap-3 px-1">
+            {/* Who's watching */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {connectedUsers.map((u) => (
+                <div key={u.socketId} className="flex items-center gap-1.5 bg-surface-800 rounded-full pl-1 pr-3 py-1">
+                  <div
+                    className="w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
+                    style={{
+                      background:
+                        u.role === 'admin'
+                          ? 'linear-gradient(135deg,#6366f1,#8b5cf6)'
+                          : 'linear-gradient(135deg,#0ea5e9,#06b6d4)',
+                    }}
+                  >
+                    {u.username.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="text-surface-300 text-xs">
+                    {u.username}
+                    {u.username === me.username ? ' (you)' : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Keyboard shortcuts hint */}
+            <div className="text-surface-600 text-xs hidden sm:block">
+              {me.role === 'admin'
+                ? 'Space/K · ← → seek · ↑↓ volume · F fullscreen'
+                : '↑↓ volume · F fullscreen · M mute'}
+            </div>
+          </div>
+
+          {/* Admin: no video URL notice */}
+          {me.role === 'admin' && !videoUrl && (
+            <div className="w-full max-w-5xl mt-4">
+              <div className="flex items-start gap-3 bg-surface-800/60 border border-surface-700 rounded-xl px-4 py-3">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="#6366f1" className="flex-shrink-0 mt-0.5">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <p className="text-surface-300 text-sm">
+                  No video loaded. Go to{' '}
+                  <Link href="/admin">
+                    <span className="text-brand-400 hover:underline cursor-pointer">Admin Dashboard</span>
+                  </Link>{' '}
+                  → Session tab to paste a video URL, then come back here.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* User: waiting notice */}
+          {me.role === 'user' && !videoUrl && (
+            <div className="w-full max-w-5xl mt-4">
+              <div className="flex items-center gap-3 bg-surface-800/60 border border-surface-700 rounded-xl px-4 py-3">
+                <div className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                <p className="text-surface-300 text-sm">
+                  Waiting for admin to load a movie…
+                </p>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </>
+  );
+}
