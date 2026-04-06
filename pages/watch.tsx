@@ -26,12 +26,28 @@ interface SessionState {
   users: ConnectedUser[];
 }
 
-const ICE_SERVERS = {
+const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
+    // Free TURN servers for NAT traversal (works behind firewalls/symmetric NAT)
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
+  iceCandidatePoolSize: 10,
 };
 
 export default function WatchPage() {
@@ -223,10 +239,26 @@ export default function WatchPage() {
     }
 
     pc.ontrack = (event) => {
-      const audio = new Audio();
+      // Use a persistent <audio> element (iOS Safari blocks new Audio() autoplay)
+      let audio = document.getElementById('remote-audio') as HTMLAudioElement;
+      if (!audio) {
+        audio = document.createElement('audio');
+        audio.id = 'remote-audio';
+        audio.autoplay = true;
+        audio.setAttribute('playsinline', '');
+        document.body.appendChild(audio);
+      }
       audio.srcObject = event.streams[0];
-      audio.autoplay = true;
-      audio.play().catch(console.error);
+      // iOS Safari needs play() inside a user-gesture chain; catch + retry
+      audio.play().catch(() => {
+        const resume = () => {
+          audio.play().catch(console.error);
+          document.removeEventListener('touchstart', resume);
+          document.removeEventListener('click', resume);
+        };
+        document.addEventListener('touchstart', resume, { once: true });
+        document.addEventListener('click', resume, { once: true });
+      });
       setVoiceStatus('Voice connected');
       setTimeout(() => setVoiceStatus(''), 2000);
     };
@@ -254,16 +286,33 @@ export default function WatchPage() {
     if (!voiceActive) {
       // Start voice chat
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        // iOS Safari: need echoCancellation + specific constraints
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
         localStreamRef.current = stream;
         setVoiceActive(true);
         setVoiceStatus('Mic on — waiting for other party…');
 
-        // Add tracks to existing peer connections
-        peerConnsRef.current.forEach((pc) => {
+        // Add tracks to existing peer connections and renegotiate
+        peerConnsRef.current.forEach(async (pc) => {
           stream.getTracks().forEach((track) => {
             pc.addTrack(track, stream);
           });
+          // Renegotiate to send the new track
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socketRef.current?.emit('webrtc:offer', {
+              targetId: Array.from(peerConnsRef.current.entries()).find(([, p]) => p === pc)?.[0],
+              offer: pc.localDescription,
+            });
+          } catch { /* peer may not be ready yet */ }
         });
       } catch (err) {
         setVoiceStatus('Microphone access denied');

@@ -38,16 +38,14 @@ function formatTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-function getVideoFormat(url: string): 'hls' | 'proxy' | 'native' {
-  if (!url) return 'native';
+function needsProxy(url: string): boolean {
+  if (!url) return false;
   const u = url.toLowerCase().split('?')[0];
-  if (u.endsWith('.m3u8')) return 'hls';
-  if (u.endsWith('.mkv') || u.endsWith('.avi') || u.endsWith('.flv') || u.endsWith('.mov')) return 'proxy';
-  return 'native';
+  return /\.(mkv|avi|flv|wmv|ts|m2ts)$/.test(u);
 }
 
-function proxyUrl(src: string): string {
-  return `/api/stream?url=${encodeURIComponent(src)}`;
+function isHls(url: string): boolean {
+  return url.toLowerCase().split('?')[0].endsWith('.m3u8');
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
@@ -59,8 +57,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const progressRef = useRef<HTMLInputElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const fallbackAttempted = useRef(false);
+  const originalSrc = useRef('');
 
   const [playing, setPlaying] = useState(false);
+  const [transcoding, setTranscoding] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
@@ -112,12 +113,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     const v = videoRef.current;
     if (!v || !src) return;
 
-    const fmt = getVideoFormat(src);
+    // Reset fallback state on new src
+    fallbackAttempted.current = false;
+    originalSrc.current = src;
+    setTranscoding(false);
 
-    if (fmt === 'hls') {
+    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+
+    if (isHls(src)) {
       import('hls.js').then(({ default: HlsLib }) => {
         if (!HlsLib.isSupported()) {
-          // Safari supports HLS natively
           v.src = src;
           v.load();
           return;
@@ -131,9 +136,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       return () => { hlsRef.current?.destroy(); hlsRef.current = null; };
     }
 
-    // proxy (mkv/avi/flv) or native — set src directly
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-    v.src = fmt === 'proxy' ? proxyUrl(src) : src;
+    if (needsProxy(src)) {
+      // Step 1: Try simple proxy (instant, works on Safari/iOS/Android with native H.265)
+      v.src = `/api/proxy?url=${encodeURIComponent(src)}`;
+    } else {
+      v.src = src;
+    }
     v.load();
   }, [src]);
 
@@ -158,8 +166,20 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['canplay', () => setBuffering(false)],
       ['error', () => {
         const code = v.error?.code;
+        const raw = originalSrc.current;
+
+        // If proxy failed and we haven't tried transcode yet → fall back to FFmpeg transcode
+        if (!fallbackAttempted.current && needsProxy(raw)) {
+          fallbackAttempted.current = true;
+          setTranscoding(true);
+          setVideoError('');
+          v.src = `/api/stream?url=${encodeURIComponent(raw)}`;
+          v.load();
+          return;
+        }
+
         if (code === 4) {
-          setVideoError('This video format is not supported by your browser. Try Chrome on macOS or Safari for H.265/MKV files.');
+          setVideoError('Video format not supported. The server may be blocking playback or the codec is unsupported.');
         } else {
           setVideoError(`Video failed to load (error ${code ?? 'unknown'}). Check the URL or network.`);
         }
@@ -302,10 +322,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         onDoubleClick={isAdmin ? (playing ? handlePause : handlePlay) : undefined}
       />
 
-      {/* Buffering overlay */}
+      {/* Buffering / Transcoding overlay */}
       {buffering && !videoError && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
           <div className="buffering-spinner" />
+          {transcoding && (
+            <p className="text-white/70 text-xs mt-4 animate-pulse">Transcoding video for your browser… this may take a moment</p>
+          )}
         </div>
       )}
 
