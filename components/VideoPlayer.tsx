@@ -81,7 +81,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     seek: (time: number) => {
       if (videoRef.current) videoRef.current.currentTime = time;
     },
-    play: () => { videoRef.current?.play().catch(console.error); },
+    play: () => {
+      const v = videoRef.current;
+      if (!v) return;
+      v.play().catch(() => {
+        v.muted = true;
+        setMuted(true);
+        v.play().catch(console.error);
+      });
+    },
     pause: () => { videoRef.current?.pause(); },
     setVolume: (v: number) => {
       if (videoRef.current) {
@@ -111,10 +119,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         if (!HlsLib.isSupported()) {
           // Safari supports HLS natively
           v.src = src;
+          v.load();
           return;
         }
         if (hlsRef.current) hlsRef.current.destroy();
-        const hls = new HlsLib({ enableWorker: true });
+        const hls = new HlsLib({ enableWorker: true, xhrSetup: (xhr) => { xhr.withCredentials = false; } });
         hlsRef.current = hls;
         hls.loadSource(src);
         hls.attachMedia(v);
@@ -125,6 +134,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     // proxy (mkv/avi/flv) or native — set src directly
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     v.src = fmt === 'proxy' ? proxyUrl(src) : src;
+    v.load();
   }, [src]);
 
   useEffect(() => {
@@ -212,8 +222,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   }, [isAdmin, volume]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handlePlay() {
-    videoRef.current?.play().catch(console.error);
-    onPlay?.(videoRef.current?.currentTime ?? 0);
+    const v = videoRef.current;
+    if (!v) return;
+    v.play().catch(() => {
+      // Mobile autoplay blocked — try muted as fallback
+      v.muted = true;
+      setMuted(true);
+      v.play().catch(console.error);
+    });
+    onPlay?.(v.currentTime);
   }
 
   function handlePause() {
@@ -281,7 +298,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         className="w-full h-full object-contain transition-transform duration-300"
         style={{ transform: `rotate(${rotation}deg)` }}
         playsInline
-        crossOrigin="anonymous"
+        preload="metadata"
         onDoubleClick={isAdmin ? (playing ? handlePause : handlePlay) : undefined}
       />
 
