@@ -19,6 +19,7 @@ export interface VideoPlayerHandle {
 interface Props {
   src: string;
   isAdmin: boolean;
+  videoDuration?: number;           // ffprobe-provided total duration
   onPlay?: (t: number) => void;
   onPause?: (t: number) => void;
   onSeek?: (t: number) => void;
@@ -52,8 +53,16 @@ function streamUrl(rawUrl: string, startSec: number): string {
   return `/api/stream?url=${encodeURIComponent(rawUrl)}&start=${startSec}`;
 }
 
+// Check if a target local time (relative to current stream) is within the buffered range
+function isInBuffer(v: HTMLVideoElement, localTime: number): boolean {
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (localTime >= v.buffered.start(i) - 0.5 && localTime <= v.buffered.end(i)) return true;
+  }
+  return false;
+}
+
 const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
-  { src, isAdmin, onPlay, onPause, onSeek, onTimeUpdate, connectedUsers = [], voiceActive, isMuted, onToggleMic },
+  { src, isAdmin, videoDuration, onPlay, onPause, onSeek, onTimeUpdate, connectedUsers = [], voiceActive, isMuted, onToggleMic },
   ref
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -64,6 +73,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const modeRef = useRef<VideoMode>('native');
   const rawSrcRef = useRef('');          // original URL (before proxy/transcode)
   const timeOffsetRef = useRef(0);       // seek offset for transcode mode
+  const seekingRef = useRef(false);      // true while changing src for server-side seek
 
   const [playing, setPlaying] = useState(false);
   const [transcoding, setTranscoding] = useState(false);
@@ -82,18 +92,36 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [newUrl, setNewUrl] = useState('');
 
-  // Seek helper that handles transcode mode (server-side seek via new URL)
+  // Seek helper — buffer-aware for transcode mode
   const doSeek = useCallback((targetTime: number) => {
     const v = videoRef.current;
     if (!v) return;
+    setVideoError('');                     // clear any previous error
+
     if (modeRef.current === 'transcode') {
-      // Server-side seek: change src with &start= parameter
+      // Calculate where this time falls within the current stream
+      const localTarget = targetTime - timeOffsetRef.current;
+
+      // If target is within buffered data, seek locally (instant — no new FFmpeg)
+      if (localTarget >= 0 && isInBuffer(v, localTarget)) {
+        v.currentTime = localTarget;
+        setCurrentTime(targetTime);
+        return;
+      }
+
+      // Outside buffer → server-side seek: new FFmpeg from that position
+      seekingRef.current = true;           // suppress error events during transition
       timeOffsetRef.current = targetTime;
       setCurrentTime(targetTime);
       setBuffering(true);
       v.src = streamUrl(rawSrcRef.current, targetTime);
       v.load();
-      v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+      const onReady = () => {
+        seekingRef.current = false;
+        v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+        v.removeEventListener('canplay', onReady);
+      };
+      v.addEventListener('canplay', onReady);
     } else {
       v.currentTime = targetTime;
     }
@@ -183,13 +211,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['playing', () => setBuffering(false)],
       ['canplay', () => setBuffering(false)],
       ['error', () => {
+        if (seekingRef.current) return;    // ignore errors during server-side seek transition
         const code = v.error?.code;
         if (code === 4) {
           setVideoError(modeRef.current === 'transcode'
             ? 'Transcoding failed. The video server may be blocking downloads or the file is corrupted.'
             : 'Video format not supported by your browser.');
-        } else {
-          setVideoError(`Video failed to load (error ${code ?? 'unknown'}). Check the URL or network.`);
+        } else if (code) {
+          setVideoError(`Video failed to load (error ${code}). Check the URL or network.`);
         }
       }],
       ['fullscreenchange', () => setIsFullscreen(!!document.fullscreenElement)],
@@ -299,7 +328,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     setRotation((r) => (r + 90) % 360);
   }
 
-  const progressPercent = duration ? (currentTime / duration) * 100 : 0;
+  // Use ffprobe-provided duration if the element doesn't know it (transcode mode)
+  const effectiveDuration = (duration && isFinite(duration) && duration > 0)
+    ? duration
+    : (videoDuration || 0);
+  const progressPercent = effectiveDuration ? (currentTime / effectiveDuration) * 100 : 0;
 
   const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -455,9 +488,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
               type="range"
               className="progress-bar w-full relative z-10"
               min={0}
-              max={duration || 100}
+              max={effectiveDuration || 100}
               step={0.1}
-              value={currentTime}
+              value={Math.min(currentTime, effectiveDuration || 100)}
               disabled={!isAdmin}
               onChange={(e) => handleSeek(parseFloat(e.target.value))}
               style={{
@@ -557,7 +590,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
           {/* Time */}
           <span className="text-white/80 text-xs font-mono ml-1 flex-shrink-0">
-            {formatTime(currentTime)} / {formatTime(duration)}
+            {formatTime(currentTime)} / {effectiveDuration ? formatTime(effectiveDuration) : '--:--'}
           </span>
 
           <div className="flex-1" />

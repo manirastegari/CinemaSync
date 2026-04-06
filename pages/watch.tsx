@@ -24,6 +24,7 @@ interface SessionState {
   currentTime: number;
   timestamp: number;
   users: ConnectedUser[];
+  videoDuration?: number;
 }
 
 const ICE_SERVERS: RTCConfiguration = {
@@ -55,6 +56,7 @@ export default function WatchPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [videoUrl, setVideoUrl] = useState('');
   const [connectedUsers, setConnectedUsers] = useState<ConnectedUser[]>([]);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [voiceActive, setVoiceActive] = useState(false);  // true = user has started their mic
   const [micMuted, setMicMuted] = useState(false);
   const [peerConnected, setPeerConnected] = useState(false); // true = WebRTC PC is connected
@@ -93,25 +95,27 @@ export default function WatchPage() {
     socket.on('session:state', (state: SessionState) => {
       setVideoUrl(state.videoUrl);
       setConnectedUsers(state.users);
+      if (state.videoDuration) setVideoDuration(state.videoDuration);
 
       if (me.role === 'user' && state.videoUrl) {
-        // Calculate adjusted time accounting for elapsed since last update
         const elapsed = (Date.now() - state.timestamp) / 1000;
         const targetTime = state.isPlaying ? state.currentTime + elapsed : state.currentTime;
 
+        // Wait for video element to be ready, then sync
         setTimeout(() => {
           const p = playerRef.current;
           if (!p) return;
-          p.seek(targetTime);
-          if (state.isPlaying) {
-            p.play();
-          } else {
-            p.pause();
-          }
+          if (targetTime > 1) p.seek(targetTime);
+          if (state.isPlaying) p.play(); else p.pause();
           setSyncStatus('Synced');
           setTimeout(() => setSyncStatus(''), 2000);
-        }, 800); // small delay to let video load
+        }, 1500);
       }
+    });
+
+    // Duration arrives from ffprobe (may come after session:state)
+    socket.on('video:duration', ({ duration }: { duration: number }) => {
+      setVideoDuration(duration);
     });
 
     socket.on('room:users', (users: ConnectedUser[]) => {
@@ -146,6 +150,18 @@ export default function WatchPage() {
         p.seek(currentTime + elapsed * 0.5);
         setSyncStatus('⏩ Seek');
         setTimeout(() => setSyncStatus(''), 1500);
+      });
+
+      // Periodic heartbeat sync — correct drift if > 5s out of sync
+      socket.on('video:heartbeat', ({ currentTime: adminTime }: { currentTime: number }) => {
+        const p = playerRef.current;
+        if (!p) return;
+        const myTime = p.getCurrentTime();
+        if (Math.abs(myTime - adminTime) > 5) {
+          p.seek(adminTime);
+          setSyncStatus('Re-synced');
+          setTimeout(() => setSyncStatus(''), 1500);
+        }
       });
     }
 
@@ -290,6 +306,33 @@ export default function WatchPage() {
     return pc;
   }
 
+  // ── Auto-request mic on page load ────────────────────────────────────────
+  useEffect(() => {
+    if (!me) return;
+    // Try to get mic immediately (works if permission already granted or desktop)
+    navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    }).then((stream) => {
+      localStreamRef.current = stream;
+      setVoiceActive(true);
+      setMicMuted(false);
+      setVoiceStatus('Mic ready');
+      setTimeout(() => setVoiceStatus(''), 2000);
+      // Add tracks to any existing peer connections
+      for (const [peerId, pc] of peerConnsRef.current.entries()) {
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        pc.createOffer().then((offer) => {
+          pc.setLocalDescription(offer);
+          socketRef.current?.emit('webrtc:offer', { targetId: peerId, offer });
+        }).catch(() => {});
+      }
+    }).catch(() => {
+      setVoiceStatus('Tap mic button to enable voice');
+      setTimeout(() => setVoiceStatus(''), 3000);
+    });
+  }, [me]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Voice chat toggle ─────────────────────────────────────────────────────
   const handleToggleMic = useCallback(async () => {
     // No local stream yet → start mic for the first time
@@ -430,6 +473,7 @@ export default function WatchPage() {
               ref={playerRef}
               src={videoUrl}
               isAdmin={me.role === 'admin'}
+              videoDuration={videoDuration}
               onPlay={handlePlay}
               onPause={handlePause}
               onSeek={handleSeek}
