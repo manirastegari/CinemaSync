@@ -4,91 +4,63 @@ import { spawn, execSync } from 'child_process';
 
 export const config = { api: { responseLimit: false } };
 
-// Check once at startup whether ffmpeg is available
-let ffmpegAvailable = false;
-try {
-  execSync('ffmpeg -version', { stdio: 'ignore' });
-  ffmpegAvailable = true;
-  console.log('  ✦ FFmpeg found');
-} catch {
-  console.warn('  ✖ FFmpeg NOT found — /api/stream will not work');
-}
+let ffmpegOk = false;
+try { execSync('ffmpeg -version', { stdio: 'ignore' }); ffmpegOk = true; } catch {}
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  const payload = getTokenFromRequest(req);
-  if (!payload) return res.status(401).json({ error: 'Unauthorized' });
+  if (!getTokenFromRequest(req)) return res.status(401).json({ error: 'Unauthorized' });
+  if (!ffmpegOk) return res.status(503).json({ error: 'FFmpeg not installed' });
 
-  if (!ffmpegAvailable) {
-    return res.status(503).json({ error: 'FFmpeg is not installed on this server.' });
-  }
-
-  const { url } = req.query;
+  const { url, start } = req.query;
   if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
 
   const videoUrl = decodeURIComponent(url);
+  const seekSec = Math.max(0, parseFloat(String(start || '0')) || 0);
 
-  const args = [
+  const args: string[] = [
     '-hide_banner', '-loglevel', 'warning',
-    // Spoof browser so download servers accept the request
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     '-headers', 'Accept: */*\r\nReferer: https://www.google.com/\r\n',
-    // Allow time for slow servers to respond
-    '-analyzeduration', '10000000',
-    '-probesize', '10000000',
-    '-i', videoUrl,
-    // Transcode video to H.264 (the only universally supported codec)
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
-    '-pix_fmt', 'yuv420p',
-    // Convert any audio (AC3/DTS/5.1) to stereo AAC
-    '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
-    // Fragmented MP4 for streaming (no seek-back needed)
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-f', 'mp4',
-    'pipe:1',
+    '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
   ];
 
-  // Send headers immediately so the browser keeps the connection open while FFmpeg starts
+  // Fast seek: -ss before -i skips at the demuxer level (near-instant)
+  if (seekSec > 0) args.push('-ss', String(seekSec));
+
+  args.push(
+    '-analyzeduration', '10000000', '-probesize', '10000000',
+    '-i', videoUrl,
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    '-f', 'mp4', 'pipe:1',
+  );
+
+  // Send headers immediately so browser keeps connection open during FFmpeg startup
   res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Transfer-Encoding', 'chunked');
   res.flushHeaders();
 
+  const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let gotData = false;
 
-  const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  ffmpeg.stdout.on('data', (chunk: Buffer) => { gotData = true; res.write(chunk); });
 
-  ffmpeg.stdout.on('data', (chunk: Buffer) => {
-    gotData = true;
-    res.write(chunk);
-  });
-
-  const stderrChunks: string[] = [];
   ffmpeg.stderr.on('data', (d: Buffer) => {
-    const line = d.toString();
-    stderrChunks.push(line);
-    // Log real errors (not progress)
-    if (/error|invalid|denied|forbidden|404|refused/i.test(line)) {
-      console.error('[ffmpeg]', line.trim());
-    }
+    const l = d.toString();
+    if (/error|denied|forbidden|404|refused/i.test(l)) console.error('[ffmpeg]', l.trim());
   });
 
   ffmpeg.on('error', (err) => {
     console.error('[ffmpeg] spawn error:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'FFmpeg failed to start: ' + err.message });
-    }
     res.end();
   });
 
   ffmpeg.on('close', (code) => {
-    if (code !== 0 && !gotData) {
-      console.error('[ffmpeg] failed (exit ' + code + '):', stderrChunks.join('').slice(-500));
-      console.error('[ffmpeg] No data produced, video may be unsupported');
-    }
+    if (code !== 0 && !gotData) console.error('[ffmpeg] exit', code, '— no data produced');
     res.end();
   });
 
-  req.on('close', () => {
-    ffmpeg.kill('SIGKILL');
-  });
+  req.on('close', () => { ffmpeg.kill('SIGKILL'); });
 }

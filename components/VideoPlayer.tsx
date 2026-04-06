@@ -38,14 +38,18 @@ function formatTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-function needsProxy(url: string): boolean {
-  if (!url) return false;
+type VideoMode = 'native' | 'hls' | 'transcode';
+
+function detectMode(url: string): VideoMode {
+  if (!url) return 'native';
   const u = url.toLowerCase().split('?')[0];
-  return /\.(mkv|avi|flv|wmv|ts|m2ts)$/.test(u);
+  if (u.endsWith('.m3u8')) return 'hls';
+  if (/\.(mkv|avi|flv|wmv|ts|m2ts|mov)$/.test(u)) return 'transcode';
+  return 'native';
 }
 
-function isHls(url: string): boolean {
-  return url.toLowerCase().split('?')[0].endsWith('.m3u8');
+function streamUrl(rawUrl: string, startSec: number): string {
+  return `/api/stream?url=${encodeURIComponent(rawUrl)}&start=${startSec}`;
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
@@ -57,8 +61,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const progressRef = useRef<HTMLInputElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const fallbackAttempted = useRef(false);
-  const originalSrc = useRef('');
+  const modeRef = useRef<VideoMode>('native');
+  const rawSrcRef = useRef('');          // original URL (before proxy/transcode)
+  const timeOffsetRef = useRef(0);       // seek offset for transcode mode
 
   const [playing, setPlaying] = useState(false);
   const [transcoding, setTranscoding] = useState(false);
@@ -77,19 +82,30 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [newUrl, setNewUrl] = useState('');
 
+  // Seek helper that handles transcode mode (server-side seek via new URL)
+  const doSeek = useCallback((targetTime: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (modeRef.current === 'transcode') {
+      // Server-side seek: change src with &start= parameter
+      timeOffsetRef.current = targetTime;
+      setCurrentTime(targetTime);
+      setBuffering(true);
+      v.src = streamUrl(rawSrcRef.current, targetTime);
+      v.load();
+      v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+    } else {
+      v.currentTime = targetTime;
+    }
+  }, []);
+
   useImperativeHandle(ref, () => ({
-    getCurrentTime: () => videoRef.current?.currentTime ?? 0,
-    seek: (time: number) => {
-      if (videoRef.current) videoRef.current.currentTime = time;
-    },
+    getCurrentTime: () => (videoRef.current?.currentTime ?? 0) + timeOffsetRef.current,
+    seek: (time: number) => doSeek(time),
     play: () => {
       const v = videoRef.current;
       if (!v) return;
-      v.play().catch(() => {
-        v.muted = true;
-        setMuted(true);
-        v.play().catch(console.error);
-      });
+      v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
     },
     pause: () => { videoRef.current?.pause(); },
     setVolume: (v: number) => {
@@ -108,19 +124,20 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     }, 3000);
   }, [playing]);
 
-  // ── HLS / format handling ────────────────────────────────────────────────
+  // ── Format handling ─────────────────────────────────────────────────────
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !src) return;
 
-    // Reset fallback state on new src
-    fallbackAttempted.current = false;
-    originalSrc.current = src;
-    setTranscoding(false);
+    const mode = detectMode(src);
+    modeRef.current = mode;
+    rawSrcRef.current = src;
+    timeOffsetRef.current = 0;
+    setTranscoding(mode === 'transcode');
 
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    if (isHls(src)) {
+    if (mode === 'hls') {
       import('hls.js').then(({ default: HlsLib }) => {
         if (!HlsLib.isSupported()) {
           v.src = src;
@@ -136,9 +153,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       return () => { hlsRef.current?.destroy(); hlsRef.current = null; };
     }
 
-    if (needsProxy(src)) {
-      // Step 1: Try simple proxy (instant, works on Safari/iOS/Android with native H.265)
-      v.src = `/api/proxy?url=${encodeURIComponent(src)}`;
+    if (mode === 'transcode') {
+      // Go directly to FFmpeg transcode — no browser plays MKV natively
+      v.src = streamUrl(src, 0);
     } else {
       v.src = src;
     }
@@ -151,9 +168,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
     const handlers: [string, EventListener][] = [
       ['timeupdate', () => {
-        setCurrentTime(v.currentTime);
-        onTimeUpdate?.(v.currentTime);
-        if (v.buffered.length > 0) {
+        const real = v.currentTime + timeOffsetRef.current;
+        setCurrentTime(real);
+        onTimeUpdate?.(real);
+        if (v.buffered.length > 0 && v.duration && isFinite(v.duration)) {
           setBuffered((v.buffered.end(v.buffered.length - 1) / v.duration) * 100);
         }
       }],
@@ -166,20 +184,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['canplay', () => setBuffering(false)],
       ['error', () => {
         const code = v.error?.code;
-        const raw = originalSrc.current;
-
-        // If proxy failed and we haven't tried transcode yet → fall back to FFmpeg transcode
-        if (!fallbackAttempted.current && needsProxy(raw)) {
-          fallbackAttempted.current = true;
-          setTranscoding(true);
-          setVideoError('');
-          v.src = `/api/stream?url=${encodeURIComponent(raw)}`;
-          v.load();
-          return;
-        }
-
         if (code === 4) {
-          setVideoError('Video format not supported. The server may be blocking playback or the codec is unsupported.');
+          setVideoError(modeRef.current === 'transcode'
+            ? 'Transcoding failed. The video server may be blocking downloads or the file is corrupted.'
+            : 'Video format not supported by your browser.');
         } else {
           setVideoError(`Video failed to load (error ${code ?? 'unknown'}). Check the URL or network.`);
         }
@@ -244,33 +252,28 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   function handlePlay() {
     const v = videoRef.current;
     if (!v) return;
-    v.play().catch(() => {
-      // Mobile autoplay blocked — try muted as fallback
-      v.muted = true;
-      setMuted(true);
-      v.play().catch(console.error);
-    });
-    onPlay?.(v.currentTime);
+    v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+    onPlay?.((v.currentTime) + timeOffsetRef.current);
   }
 
   function handlePause() {
-    videoRef.current?.pause();
-    onPause?.(videoRef.current?.currentTime ?? 0);
+    const v = videoRef.current;
+    if (!v) return;
+    v.pause();
+    onPause?.((v.currentTime) + timeOffsetRef.current);
   }
 
   function handleSeek(time: number) {
-    if (videoRef.current) {
-      videoRef.current.currentTime = time;
-      onSeek?.(time);
-    }
+    doSeek(time);
+    onSeek?.(time);
   }
 
   function handleSkip(delta: number) {
     const v = videoRef.current;
     if (!v) return;
-    const dur = v.duration && isFinite(v.duration) ? v.duration : Infinity;
-    const next = Math.max(0, Math.min(dur, v.currentTime + delta));
-    v.currentTime = next;
+    const realTime = v.currentTime + timeOffsetRef.current;
+    const next = Math.max(0, realTime + delta);
+    doSeek(next);
     onSeek?.(next);
   }
 

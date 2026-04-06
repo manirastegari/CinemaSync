@@ -55,8 +55,9 @@ export default function WatchPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [videoUrl, setVideoUrl] = useState('');
   const [connectedUsers, setConnectedUsers] = useState<ConnectedUser[]>([]);
-  const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);  // true = user has started their mic
   const [micMuted, setMicMuted] = useState(false);
+  const [peerConnected, setPeerConnected] = useState(false); // true = WebRTC PC is connected
   const [voiceStatus, setVoiceStatus] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
 
@@ -164,7 +165,6 @@ export default function WatchPage() {
     });
 
     socket.on('webrtc:offer', async ({ fromId, offer }: { fromId: string; offer: RTCSessionDescriptionInit }) => {
-      // Accept offer without requiring mic — receive-only is fine initially
       let pc = peerConnsRef.current.get(fromId);
       if (!pc) {
         pc = createPeerConnection(fromId, socket);
@@ -172,12 +172,20 @@ export default function WatchPage() {
       }
 
       try {
-        await pc.setRemoteDescription(offer);
+        // Handle renegotiation glare: if we also sent an offer, rollback first
+        if (pc.signalingState !== 'stable') {
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription(offer),
+          ]);
+        } else {
+          await pc.setRemoteDescription(offer);
+        }
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('webrtc:answer', { targetId: fromId, answer });
       } catch (err) {
-        console.error('Answer error', err);
+        console.error('Answer/renegotiation error', err);
       }
     });
 
@@ -269,10 +277,13 @@ export default function WatchPage() {
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
-        setVoiceActive(true);
-        setVoiceStatus('');
+        setPeerConnected(true);
+        setVoiceStatus('Peer connected — tap mic to talk');
+        setTimeout(() => setVoiceStatus(''), 3000);
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        setVoiceActive(false);
+        setPeerConnected(false);
+        setVoiceStatus('Voice disconnected');
+        setTimeout(() => setVoiceStatus(''), 2000);
       }
     };
 
@@ -281,28 +292,21 @@ export default function WatchPage() {
 
   // ── Voice chat toggle ─────────────────────────────────────────────────────
   const handleToggleMic = useCallback(async () => {
-    if (!voiceActive) {
-      // Start voice chat
+    // No local stream yet → start mic for the first time
+    if (!localStreamRef.current) {
       try {
-        // iOS Safari: need echoCancellation + specific constraints
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: false,
         });
         localStreamRef.current = stream;
         setVoiceActive(true);
-        setVoiceStatus('Mic on — waiting for other party…');
+        setMicMuted(false);
+        setVoiceStatus('Mic on — connecting…');
 
-        // Add tracks to all existing peer connections and renegotiate
+        // Add audio track to ALL existing peer connections and renegotiate
         for (const [peerId, pc] of peerConnsRef.current.entries()) {
-          stream.getTracks().forEach((track) => {
-            pc.addTrack(track, stream);
-          });
-          // Renegotiate so the remote side receives our audio
+          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
           try {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
@@ -311,20 +315,23 @@ export default function WatchPage() {
             console.error('Renegotiation error for', peerId, err);
           }
         }
-      } catch (err) {
+        setTimeout(() => setVoiceStatus(''), 2000);
+      } catch {
         setVoiceStatus('Microphone access denied');
         setTimeout(() => setVoiceStatus(''), 3000);
       }
-    } else if (micMuted) {
-      // Unmute
-      localStreamRef.current?.getTracks().forEach((t) => { t.enabled = true; });
+      return;
+    }
+
+    // Already have mic → toggle mute/unmute
+    if (micMuted) {
+      localStreamRef.current.getTracks().forEach((t) => { t.enabled = true; });
       setMicMuted(false);
     } else {
-      // Mute
-      localStreamRef.current?.getTracks().forEach((t) => { t.enabled = false; });
+      localStreamRef.current.getTracks().forEach((t) => { t.enabled = false; });
       setMicMuted(true);
     }
-  }, [voiceActive, micMuted]);
+  }, [micMuted]);
 
   // ── Admin video event emitters ────────────────────────────────────────────
   const handlePlay = useCallback((currentTime: number) => {
