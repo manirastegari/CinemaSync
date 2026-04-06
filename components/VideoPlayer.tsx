@@ -6,6 +6,7 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from 'react';
+import type Hls from 'hls.js';
 
 export interface VideoPlayerHandle {
   getCurrentTime: () => number;
@@ -37,6 +38,18 @@ function formatTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
+function getVideoFormat(url: string): 'hls' | 'proxy' | 'native' {
+  if (!url) return 'native';
+  const u = url.toLowerCase().split('?')[0];
+  if (u.endsWith('.m3u8')) return 'hls';
+  if (u.endsWith('.mkv') || u.endsWith('.avi') || u.endsWith('.flv') || u.endsWith('.mov')) return 'proxy';
+  return 'native';
+}
+
+function proxyUrl(src: string): string {
+  return `/api/stream?url=${encodeURIComponent(src)}`;
+}
+
 const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   { src, isAdmin, onPlay, onPause, onSeek, onTimeUpdate, connectedUsers = [], voiceActive, isMuted, onToggleMic },
   ref
@@ -45,6 +58,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const containerRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLInputElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
 
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -84,6 +98,34 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       if (playing) setShowControls(false);
     }, 3000);
   }, [playing]);
+
+  // ── HLS / format handling ────────────────────────────────────────────────
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !src) return;
+
+    const fmt = getVideoFormat(src);
+
+    if (fmt === 'hls') {
+      import('hls.js').then(({ default: HlsLib }) => {
+        if (!HlsLib.isSupported()) {
+          // Safari supports HLS natively
+          v.src = src;
+          return;
+        }
+        if (hlsRef.current) hlsRef.current.destroy();
+        const hls = new HlsLib({ enableWorker: true });
+        hlsRef.current = hls;
+        hls.loadSource(src);
+        hls.attachMedia(v);
+      });
+      return () => { hlsRef.current?.destroy(); hlsRef.current = null; };
+    }
+
+    // proxy (mkv/avi/flv) or native — set src directly
+    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    v.src = fmt === 'proxy' ? proxyUrl(src) : src;
+  }, [src]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -233,10 +275,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         setShowSpeedMenu(false);
       }}
     >
-      {/* Video element */}
+      {/* Video element — src set by format-detection useEffect */}
       <video
         ref={videoRef}
-        src={src}
         className="w-full h-full object-contain transition-transform duration-300"
         style={{ transform: `rotate(${rotation}deg)` }}
         playsInline
