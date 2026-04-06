@@ -148,15 +148,14 @@ export default function WatchPage() {
       });
     }
 
-    // WebRTC: new peer joined (call them)
+    // WebRTC: new peer joined (call them) — always create PC even without mic
     socket.on('webrtc:peer-joined', async ({ peerId, username: peerName }: { peerId: string; username: string }) => {
-      setVoiceStatus(`${peerName} joined — connecting voice…`);
-      if (!localStreamRef.current) return;
+      setVoiceStatus(`${peerName} joined`);
       const pc = createPeerConnection(peerId, socket);
       peerConnsRef.current.set(peerId, pc);
 
       try {
-        const offer = await pc.createOffer();
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
         await pc.setLocalDescription(offer);
         socket.emit('webrtc:offer', { targetId: peerId, offer });
       } catch (err) {
@@ -165,13 +164,12 @@ export default function WatchPage() {
     });
 
     socket.on('webrtc:offer', async ({ fromId, offer }: { fromId: string; offer: RTCSessionDescriptionInit }) => {
-      if (!localStreamRef.current) {
-        try {
-          localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        } catch { /* mic not available */ }
+      // Accept offer without requiring mic — receive-only is fine initially
+      let pc = peerConnsRef.current.get(fromId);
+      if (!pc) {
+        pc = createPeerConnection(fromId, socket);
+        peerConnsRef.current.set(fromId, pc);
       }
-      const pc = createPeerConnection(fromId, socket);
-      peerConnsRef.current.set(fromId, pc);
 
       try {
         await pc.setRemoteDescription(offer);
@@ -299,21 +297,20 @@ export default function WatchPage() {
         setVoiceActive(true);
         setVoiceStatus('Mic on — waiting for other party…');
 
-        // Add tracks to existing peer connections and renegotiate
-        peerConnsRef.current.forEach(async (pc) => {
+        // Add tracks to all existing peer connections and renegotiate
+        for (const [peerId, pc] of peerConnsRef.current.entries()) {
           stream.getTracks().forEach((track) => {
             pc.addTrack(track, stream);
           });
-          // Renegotiate to send the new track
+          // Renegotiate so the remote side receives our audio
           try {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            socketRef.current?.emit('webrtc:offer', {
-              targetId: Array.from(peerConnsRef.current.entries()).find(([, p]) => p === pc)?.[0],
-              offer: pc.localDescription,
-            });
-          } catch { /* peer may not be ready yet */ }
-        });
+            socketRef.current?.emit('webrtc:offer', { targetId: peerId, offer: pc.localDescription });
+          } catch (err) {
+            console.error('Renegotiation error for', peerId, err);
+          }
+        }
       } catch (err) {
         setVoiceStatus('Microphone access denied');
         setTimeout(() => setVoiceStatus(''), 3000);

@@ -268,7 +268,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   function handleSkip(delta: number) {
     const v = videoRef.current;
     if (!v) return;
-    const next = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
+    const dur = v.duration && isFinite(v.duration) ? v.duration : Infinity;
+    const next = Math.max(0, Math.min(dur, v.currentTime + delta));
     v.currentTime = next;
     onSeek?.(next);
   }

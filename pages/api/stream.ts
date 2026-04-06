@@ -47,18 +47,17 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     'pipe:1',
   ];
 
-  let headersSent = false;
+  // Send headers immediately so the browser keeps the connection open while FFmpeg starts
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.flushHeaders();
+
   let gotData = false;
 
   const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   ffmpeg.stdout.on('data', (chunk: Buffer) => {
-    if (!headersSent) {
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Transfer-Encoding', 'chunked');
-      headersSent = true;
-    }
     gotData = true;
     res.write(chunk);
   });
@@ -75,22 +74,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   ffmpeg.on('error', (err) => {
     console.error('[ffmpeg] spawn error:', err.message);
-    if (!headersSent) {
+    if (!res.headersSent) {
       res.status(500).json({ error: 'FFmpeg failed to start: ' + err.message });
-    } else {
-      res.end();
     }
+    res.end();
   });
 
   ffmpeg.on('close', (code) => {
     if (code !== 0 && !gotData) {
       console.error('[ffmpeg] failed (exit ' + code + '):', stderrChunks.join('').slice(-500));
-      if (!headersSent) {
-        res.status(502).json({
-          error: 'FFmpeg could not process this video. It may be a network issue or unsupported codec.',
-          details: stderrChunks.join('').slice(-300),
-        });
-      }
+      console.error('[ffmpeg] No data produced, video may be unsupported');
     }
     res.end();
   });
