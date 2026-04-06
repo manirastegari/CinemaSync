@@ -32,12 +32,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const ffmpegBin = getFfmpegPath();
 
   const args = [
+    // Spoof a browser User-Agent so download servers don't block FFmpeg
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '-headers', 'Accept: */*\r\nAccept-Language: en-US,en;q=0.9\r\nReferer: https://www.google.com/\r\n',
     '-i', videoUrl,
-    '-c:v', 'copy',       // copy video stream as-is (no re-encode = fast + low CPU)
-    '-c:a', 'aac',        // convert audio to AAC (browser-safe)
+    // Transcode to H.264 — the only codec all browsers support
+    // ultrafast preset = minimal CPU, good enough quality for streaming
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
+    // Convert audio to stereo AAC (handles AC3, DTS, 5.1 surround from MKV)
+    '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
     '-f', 'mp4',
-    'pipe:1',             // output to stdout
+    'pipe:1',
   ];
 
   const ffmpeg = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
