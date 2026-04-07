@@ -9,7 +9,7 @@ RUN npm run build
 
 # ── Production stage ─────────────────────────────────────────────────────────
 FROM node:20-alpine
-RUN apk add --no-cache ffmpeg ca-certificates
+RUN apk add --no-cache ffmpeg ca-certificates coreutils procps
 WORKDIR /app
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules

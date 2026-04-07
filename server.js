@@ -151,4 +151,21 @@ app.prepare().then(() => {
   httpServer.listen(PORT, () => {
     console.log(`\n  ✦ CinemaSync ready → http://localhost:${PORT}\n`);
   });
+
+  // ── Graceful shutdown (Cloud Run sends SIGTERM before stopping container) ──
+  process.on('SIGTERM', () => {
+    console.log('[server] SIGTERM received — shutting down');
+    // Kill any active FFmpeg process immediately
+    try {
+      const { execSync } = require('child_process');
+      execSync('pkill -9 -f ffmpeg 2>/dev/null || true', { stdio: 'ignore' });
+    } catch {}
+    io.close();
+    httpServer.close(() => {
+      console.log('[server] closed');
+      process.exit(0);
+    });
+    // Force exit after 5 s if close hangs
+    setTimeout(() => process.exit(0), 5000);
+  });
 });

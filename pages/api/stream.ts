@@ -35,6 +35,9 @@ interface Session {
 
 let session: Session | null = null;
 
+// Exported so server.js can kill FFmpeg on SIGTERM (container shutdown)
+export function killActiveSession() { killSession(); }
+
 function killSession() {
   if (!session) return;
   const s = session;
@@ -81,7 +84,8 @@ function startSession(videoUrl: string, seekSec: number, creatorRes: ServerRespo
   );
 
   console.log('[stream] NEW session', videoUrl.substring(0, 60), 'seek=', seekSec);
-  const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Run FFmpeg at lowest CPU priority so Node.js can still serve HTTP requests
+  const ffmpeg = spawn('nice', ['-n', '19', 'ffmpeg', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   const s: Session = {
     url: videoUrl, seek: seekSec, ffmpeg,
