@@ -39,14 +39,21 @@ function formatTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-type VideoMode = 'native' | 'hls' | 'transcode';
+type VideoMode = 'native' | 'hls' | 'proxy' | 'transcode';
 
 function detectMode(url: string): VideoMode {
   if (!url) return 'native';
   const u = url.toLowerCase().split('?')[0];
-  if (u.endsWith('.m3u8')) return 'hls';
-  if (/\.(mkv|avi|flv|wmv|ts|m2ts|mov)$/.test(u)) return 'transcode';
-  return 'native';
+  if (u.endsWith('.m3u8') || u.includes('.m3u8?')) return 'hls';
+  // Known non-browser containers → transcode directly
+  if (/\.(mkv|avi|flv|wmv|ts|m2ts|mov|3gp|divx|vob|rmvb|asf)$/.test(u)) return 'transcode';
+  // Browser-compatible formats (.mp4, .webm, .ogg) OR unknown extension → proxy first
+  // Proxy avoids CORS and follows redirects; browser can play natively through it
+  return 'proxy';
+}
+
+function proxyUrl(rawUrl: string): string {
+  return `/api/proxy?url=${encodeURIComponent(rawUrl)}`;
 }
 
 function streamUrl(rawUrl: string, startSec: number): string {
@@ -74,6 +81,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const rawSrcRef = useRef('');          // original URL (before proxy/transcode)
   const timeOffsetRef = useRef(0);       // seek offset for transcode mode
   const seekingRef = useRef(false);      // true while changing src for server-side seek
+  const fallbackTriedRef = useRef(false); // true after proxy→transcode fallback
 
   const [playing, setPlaying] = useState(false);
   const [transcoding, setTranscoding] = useState(false);
@@ -123,6 +131,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       };
       v.addEventListener('canplay', onReady);
     } else {
+      // proxy + native: browser handles seeking via Range requests / currentTime
       v.currentTime = targetTime;
     }
   }, []);
@@ -165,6 +174,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
+    fallbackTriedRef.current = false;
+
     if (mode === 'hls') {
       import('hls.js').then(({ default: HlsLib }) => {
         if (!HlsLib.isSupported()) {
@@ -182,8 +193,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     }
 
     if (mode === 'transcode') {
-      // Go directly to FFmpeg transcode — no browser plays MKV natively
       v.src = streamUrl(src, 0);
+    } else if (mode === 'proxy') {
+      v.src = proxyUrl(src);
     } else {
       v.src = src;
     }
@@ -212,6 +224,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['canplay', () => setBuffering(false)],
       ['error', () => {
         if (seekingRef.current) return;    // ignore errors during server-side seek transition
+
+        // Fallback: proxy failed → try transcode (browser can't play this format natively)
+        if (modeRef.current === 'proxy' && !fallbackTriedRef.current) {
+          console.log('[VideoPlayer] proxy mode failed — falling back to transcode');
+          fallbackTriedRef.current = true;
+          modeRef.current = 'transcode';
+          setTranscoding(true);
+          setVideoError('');
+          v.src = streamUrl(rawSrcRef.current, timeOffsetRef.current);
+          v.load();
+          const onReady = () => {
+            v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+            v.removeEventListener('canplay', onReady);
+          };
+          v.addEventListener('canplay', onReady);
+          return;
+        }
+
         const code = v.error?.code;
         if (code === 4) {
           setVideoError(modeRef.current === 'transcode'

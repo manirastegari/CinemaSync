@@ -5,8 +5,84 @@ import http from 'http';
 
 export const config = { api: { responseLimit: false, bodyParser: false } };
 
-const BROWSER_UA =
+const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Recursively follow redirects (up to maxRedirects)
+function fetchWithRedirects(
+  targetUrl: string,
+  range: string | undefined,
+  res: NextApiResponse,
+  abortSignal: { aborted: boolean },
+  redirectsLeft = 5,
+): http.ClientRequest | undefined {
+  if (redirectsLeft <= 0) {
+    if (!res.headersSent) res.status(502).json({ error: 'Too many redirects' });
+    return undefined;
+  }
+
+  let referer = 'https://www.google.com/';
+  try { referer = new URL(targetUrl).origin + '/'; } catch {}
+
+  const headers: Record<string, string> = {
+    'User-Agent': UA,
+    Accept: '*/*',
+    Referer: referer,
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+  if (range) headers['Range'] = range;
+
+  const get = targetUrl.startsWith('https') ? https.get : http.get;
+
+  const upstream = get(targetUrl, { headers, timeout: 15000 }, (remote) => {
+    if (abortSignal.aborted) { remote.destroy(); return; }
+
+    const status = remote.statusCode ?? 500;
+
+    // Follow redirects
+    if ([301, 302, 303, 307, 308].includes(status) && remote.headers.location) {
+      const next = new URL(remote.headers.location, targetUrl).href;
+      console.log('[proxy] redirect', status, '→', next.substring(0, 80));
+      remote.resume(); // drain response
+      fetchWithRedirects(next, range, res, abortSignal, redirectsLeft - 1);
+      return;
+    }
+
+    // Map content-type: force video MIME (download servers often send application/octet-stream)
+    const ct = (remote.headers['content-type'] || '').toLowerCase();
+    let mime = 'video/mp4';
+    if (ct.includes('matroska') || targetUrl.toLowerCase().includes('.mkv')) mime = 'video/x-matroska';
+    else if (ct.includes('video/')) mime = ct;
+    else if (ct.includes('audio/')) mime = ct;
+
+    const outHeaders: Record<string, string> = {
+      'Content-Type': mime,
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+      'Accept-Ranges': 'bytes',
+    };
+
+    if (remote.headers['content-length']) outHeaders['Content-Length'] = remote.headers['content-length'];
+    if (remote.headers['content-range']) outHeaders['Content-Range'] = remote.headers['content-range'];
+
+    res.writeHead(status, outHeaders);
+    remote.pipe(res);
+  });
+
+  upstream.on('error', (err) => {
+    console.error('[proxy] error:', err.message);
+    if (!res.headersSent) res.status(502).json({ error: 'Failed to fetch video: ' + err.message });
+    else if (!res.writableEnded) res.end();
+  });
+
+  upstream.on('timeout', () => {
+    console.error('[proxy] connection timeout');
+    upstream.destroy();
+    if (!res.headersSent) res.status(504).json({ error: 'Connection to video server timed out' });
+  });
+
+  return upstream;
+}
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const payload = getTokenFromRequest(req);
@@ -16,50 +92,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
 
   const videoUrl = decodeURIComponent(url);
+  const abortSignal = { aborted: false };
 
-  // Build outgoing headers — forward Range for seeking
-  const headers: Record<string, string> = {
-    'User-Agent': BROWSER_UA,
-    Accept: '*/*',
-    Referer: 'https://www.google.com/',
-  };
-  if (req.headers.range) {
-    headers['Range'] = req.headers.range;
-  }
-
-  const get = videoUrl.startsWith('https') ? https.get : http.get;
-
-  const upstream = get(videoUrl, { headers }, (remote) => {
-    const status = remote.statusCode ?? 500;
-
-    // Map content-type: force video MIME (download servers send application/octet-stream)
-    const ct = remote.headers['content-type'] || '';
-    let mime = 'video/mp4';
-    if (ct.includes('matroska') || videoUrl.toLowerCase().includes('.mkv')) mime = 'video/x-matroska';
-    else if (ct.includes('video/')) mime = ct;
-
-    const outHeaders: Record<string, string> = {
-      'Content-Type': mime,
-      'Cache-Control': 'no-cache',
-      'Access-Control-Allow-Origin': '*',
-      'Accept-Ranges': 'bytes',
-    };
-
-    // Forward range-related headers
-    if (remote.headers['content-length']) outHeaders['Content-Length'] = remote.headers['content-length'];
-    if (remote.headers['content-range']) outHeaders['Content-Range'] = remote.headers['content-range'];
-
-    res.writeHead(status === 301 || status === 302 ? 200 : status, outHeaders);
-    remote.pipe(res);
-  });
-
-  upstream.on('error', (err) => {
-    console.error('[proxy] upstream error:', err.message);
-    if (!res.headersSent) res.status(502).json({ error: 'Failed to fetch video: ' + err.message });
-    else res.end();
-  });
+  const upstream = fetchWithRedirects(videoUrl, req.headers.range, res, abortSignal);
 
   req.on('close', () => {
-    upstream.destroy();
+    abortSignal.aborted = true;
+    upstream?.destroy();
   });
 }
