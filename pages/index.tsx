@@ -70,6 +70,9 @@ export default function LoginPage() {
               <span className="text-2xl font-bold text-white tracking-tight">CinemaSync</span>
             </div>
             <p className="text-surface-400 text-sm">Watch together, from anywhere.</p>
+            <span className="inline-block mt-2 text-surface-600 text-xs font-mono">
+              v{process.env.NEXT_PUBLIC_APP_VERSION}
+            </span>
           </div>
 
           {/* Card */}

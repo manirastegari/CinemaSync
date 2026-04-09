@@ -14,7 +14,7 @@ function fetchWithRedirects(
   range: string | undefined,
   res: NextApiResponse,
   abortSignal: { aborted: boolean },
-  redirectsLeft = 5,
+  redirectsLeft = 10,
 ): http.ClientRequest | undefined {
   if (redirectsLeft <= 0) {
     if (!res.headersSent) res.status(502).json({ error: 'Too many redirects' });
@@ -34,7 +34,7 @@ function fetchWithRedirects(
 
   const get = targetUrl.startsWith('https') ? https.get : http.get;
 
-  const upstream = get(targetUrl, { headers, timeout: 15000 }, (remote) => {
+  const upstream = get(targetUrl, { headers, timeout: 20000 }, (remote) => {
     if (abortSignal.aborted) { remote.destroy(); return; }
 
     const status = remote.statusCode ?? 500;
@@ -48,18 +48,21 @@ function fetchWithRedirects(
       return;
     }
 
-    // Map content-type: force video MIME (download servers often send application/octet-stream)
+    // Determine MIME type — always a playable video type so browser streams instead of downloading.
+    // MKV → video/mp4: Chrome ignores the declared type and probes the codec; H.264 MKV plays fine.
+    // video/x-matroska is NOT in Chrome's recognised-types list and triggers a download.
     const ct = (remote.headers['content-type'] || '').toLowerCase();
     let mime = 'video/mp4';
-    if (ct.includes('matroska') || targetUrl.toLowerCase().includes('.mkv')) mime = 'video/x-matroska';
-    else if (ct.includes('video/')) mime = ct;
-    else if (ct.includes('audio/')) mime = ct;
+    if (ct.startsWith('video/') && !ct.includes('matroska') && !ct.includes('x-msvideo')) mime = ct;
+    else if (ct.startsWith('audio/')) mime = ct;
+    // else: fall back to video/mp4 (covers octet-stream, matroska, avi, unknown, etc.)
 
     const outHeaders: Record<string, string> = {
       'Content-Type': mime,
       'Cache-Control': 'no-cache',
       'Access-Control-Allow-Origin': '*',
       'Accept-Ranges': 'bytes',
+      // Never forward Content-Disposition — it would force a file download in the browser
     };
 
     if (remote.headers['content-length']) outHeaders['Content-Length'] = remote.headers['content-length'];
