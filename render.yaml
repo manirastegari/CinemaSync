@@ -1,11 +1,14 @@
 services:
   - type: web
     name: cinemasync
-    runtime: docker
+    runtime: node
     plan: free
     region: oregon
-    dockerfilePath: ./Dockerfile
+    buildCommand: npm ci && npm run build
+    startCommand: NODE_ENV=production node server.js
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "20"
     healthCheckPath: /
