@@ -142,6 +142,27 @@ app.prepare().then(() => {
 
     // ── WebRTC signaling ─────────────────────────────────────────────────────
 
+    // Client fires this when mic is activated → triggers a fresh WebRTC call with audio
+    socket.on('webrtc:user-ready', () => {
+      const user = connectedUsers.get(socket.id);
+      if (!user) return;
+      if (user.role === 'user') {
+        // Tell admin to (re-)call this user now that they have a mic
+        connectedUsers.forEach((u, sid) => {
+          if (u.role === 'admin') {
+            io.to(sid).emit('webrtc:peer-joined', { peerId: socket.id, username: user.username });
+          }
+        });
+      } else if (user.role === 'admin') {
+        // Admin got mic → (re-)call every connected user
+        connectedUsers.forEach((u, sid) => {
+          if (u.role === 'user') {
+            socket.emit('webrtc:peer-joined', { peerId: sid, username: u.username });
+          }
+        });
+      }
+    });
+
     socket.on('webrtc:offer', ({ targetId, offer }) => {
       io.to(targetId).emit('webrtc:offer', { fromId: socket.id, offer });
     });

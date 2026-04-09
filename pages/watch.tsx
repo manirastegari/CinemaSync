@@ -38,22 +38,10 @@ const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    // Free TURN servers for NAT traversal (works behind firewalls/symmetric NAT)
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -178,9 +166,14 @@ export default function WatchPage() {
       });
     }
 
-    // WebRTC: new peer joined (call them) — always create PC even without mic
+    // WebRTC: admin calls a peer (fresh PC every time, audio track included if mic is on)
     socket.on('webrtc:peer-joined', async ({ peerId, username: peerName }: { peerId: string; username: string }) => {
-      setVoiceStatus(`${peerName} joined`);
+      setVoiceStatus(`Connecting voice with ${peerName}…`);
+
+      // Always close any existing PC for this peer and start fresh
+      const existing = peerConnsRef.current.get(peerId);
+      if (existing) { try { existing.close(); } catch {} peerConnsRef.current.delete(peerId); }
+
       const pc = createPeerConnection(peerId, socket);
       peerConnsRef.current.set(peerId, pc);
 
@@ -194,27 +187,20 @@ export default function WatchPage() {
     });
 
     socket.on('webrtc:offer', async ({ fromId, offer }: { fromId: string; offer: RTCSessionDescriptionInit }) => {
-      let pc = peerConnsRef.current.get(fromId);
-      if (!pc) {
-        pc = createPeerConnection(fromId, socket);
-        peerConnsRef.current.set(fromId, pc);
-      }
+      // Always create a fresh PC so we can include our mic track if we have one
+      const existing = peerConnsRef.current.get(fromId);
+      if (existing) { try { existing.close(); } catch {} peerConnsRef.current.delete(fromId); }
+
+      const pc = createPeerConnection(fromId, socket);
+      peerConnsRef.current.set(fromId, pc);
 
       try {
-        // Handle renegotiation glare: if we also sent an offer, rollback first
-        if (pc.signalingState !== 'stable') {
-          await Promise.all([
-            pc.setLocalDescription({ type: 'rollback' }),
-            pc.setRemoteDescription(offer),
-          ]);
-        } else {
-          await pc.setRemoteDescription(offer);
-        }
+        await pc.setRemoteDescription(offer);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('webrtc:answer', { targetId: fromId, answer });
       } catch (err) {
-        console.error('Answer/renegotiation error', err);
+        console.error('Answer error', err);
       }
     });
 
@@ -317,9 +303,14 @@ export default function WatchPage() {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
         setPeerConnected(true);
-        setVoiceStatus('Peer connected — tap mic to talk');
+        setVoiceStatus(localStreamRef.current ? '🎙 Voice connected' : 'Peer connected — tap 🎙 to talk');
         setTimeout(() => setVoiceStatus(''), 3000);
-      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      } else if (pc.connectionState === 'failed') {
+        setPeerConnected(false);
+        setVoiceStatus('Voice failed — tap mic to retry');
+        setTimeout(() => setVoiceStatus(''), 4000);
+        try { pc.restartIce(); } catch {}
+      } else if (pc.connectionState === 'disconnected') {
         setPeerConnected(false);
         setVoiceStatus('Voice disconnected');
         setTimeout(() => setVoiceStatus(''), 2000);
@@ -331,7 +322,7 @@ export default function WatchPage() {
 
   // ── Voice chat toggle ─────────────────────────────────────────────────────
   const handleToggleMic = useCallback(async () => {
-    // No local stream yet → start mic for the first time
+    // No local stream yet → request mic and restart WebRTC fresh with audio
     if (!localStreamRef.current) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -340,21 +331,21 @@ export default function WatchPage() {
         setMicMuted(false);
         setVoiceStatus('Mic on — connecting…');
 
-        // Add audio track to ALL existing peer connections and renegotiate
-        for (const [peerId, pc] of peerConnsRef.current.entries()) {
-          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socketRef.current?.emit('webrtc:offer', { targetId: peerId, offer: pc.localDescription });
-          } catch (err) {
-            console.error('Renegotiation error for', peerId, err);
-          }
-        }
+        // Close all existing PCs (they were built without audio) and restart via server
+        peerConnsRef.current.forEach((pc) => { try { pc.close(); } catch {} });
+        peerConnsRef.current.clear();
+        // Signal server: I have a mic now — triggers fresh peer-joined on the admin side
+        socketRef.current?.emit('webrtc:user-ready');
         setTimeout(() => setVoiceStatus(''), 2000);
-      } catch {
-        setVoiceStatus('Microphone access denied');
-        setTimeout(() => setVoiceStatus(''), 3000);
+      } catch (err: unknown) {
+        let msg = 'Mic error';
+        if (err instanceof Error) {
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') msg = 'Mic permission denied — allow it in browser settings';
+          else if (err.name === 'NotFoundError') msg = 'No microphone found on this device';
+          else msg = `Mic error: ${err.message}`;
+        }
+        setVoiceStatus(msg);
+        setTimeout(() => setVoiceStatus(''), 5000);
       }
       return;
     }
