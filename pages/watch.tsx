@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
@@ -16,6 +16,13 @@ interface ConnectedUser {
   username: string;
   role: string;
   socketId: string;
+}
+
+interface ChatMessage {
+  id: string;
+  username: string;
+  text: string;
+  ts: number;
 }
 
 interface SessionState {
@@ -62,12 +69,18 @@ export default function WatchPage() {
   const [peerConnected, setPeerConnected] = useState(false); // true = WebRTC PC is connected
   const [voiceStatus, setVoiceStatus] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [chatUnread, setChatUnread] = useState(0);
 
   const playerRef = useRef<VideoPlayerHandle>(null);
   const socketRef = useRef<Socket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatOpenRef = useRef(false);
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -227,6 +240,11 @@ export default function WatchPage() {
       }
     });
 
+    socket.on('chat:message', (msg: ChatMessage) => {
+      setChatMessages((prev) => [...prev, msg]);
+      if (!chatOpenRef.current) setChatUnread((n) => n + 1);
+    });
+
     socket.on('webrtc:peer-left', ({ peerId }: { peerId: string }) => {
       const pc = peerConnsRef.current.get(peerId);
       if (pc) { pc.close(); peerConnsRef.current.delete(peerId); }
@@ -375,6 +393,30 @@ export default function WatchPage() {
       setMicMuted(true);
     }
   }, [micMuted]);
+
+  // ── Chat helpers ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    chatOpenRef.current = chatOpen;
+    if (chatOpen) {
+      setChatUnread(0);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+    }
+  }, [chatOpen]);
+
+  useEffect(() => {
+    if (chatOpen) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatOpen]);
+
+  function handleSendChat(e: React.FormEvent) {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+    socketRef.current?.emit('chat:message', { text: chatInput.trim() });
+    setChatInput('');
+  }
+
+  function formatTime(ts: number) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
 
   // ── Admin video event emitters ────────────────────────────────────────────
   const handlePlay = useCallback((currentTime: number) => {
@@ -547,6 +589,93 @@ export default function WatchPage() {
             </div>
           )}
         </main>
+
+        {/* ── Chat button (floating) ── */}
+        <button
+          onClick={() => setChatOpen((o) => !o)}
+          className="fixed bottom-5 right-5 z-50 w-12 h-12 rounded-full bg-brand-500 hover:bg-brand-600 shadow-lg flex items-center justify-center transition-all"
+          aria-label="Toggle chat"
+        >
+          {chatUnread > 0 && !chatOpen && (
+            <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center font-bold">
+              {chatUnread > 9 ? '9+' : chatUnread}
+            </span>
+          )}
+          {chatOpen ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="white">
+              <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="white">
+              <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+            </svg>
+          )}
+        </button>
+
+        {/* ── Chat panel ── */}
+        {chatOpen && (
+          <div className="fixed bottom-20 right-5 z-50 w-80 max-w-[calc(100vw-2.5rem)] flex flex-col rounded-2xl overflow-hidden shadow-2xl border border-surface-700" style={{ height: '420px', background: 'rgba(9,9,11,0.97)', backdropFilter: 'blur(12px)' }}>
+            {/* Chat header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700 flex-shrink-0">
+              <span className="text-white text-sm font-semibold">💬 Chat</span>
+              <button onClick={() => setChatOpen(false)} className="text-surface-400 hover:text-white transition-colors">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
+              {chatMessages.length === 0 && (
+                <p className="text-surface-500 text-xs text-center mt-4">No messages yet. Say hi! 👋</p>
+              )}
+              {chatMessages.map((msg) => {
+                const isMe = msg.username === me.username;
+                return (
+                  <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                    <div className={`flex items-center gap-1.5 mb-0.5 ${isMe ? 'flex-row-reverse' : ''}`}>
+                      <span className="text-xs font-medium" style={{ color: isMe ? '#818cf8' : '#38bdf8' }}>
+                        {isMe ? 'You' : msg.username}
+                      </span>
+                      <span className="text-surface-600 text-xs">{formatTime(msg.ts)}</span>
+                    </div>
+                    <div
+                      className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm break-words ${
+                        isMe
+                          ? 'bg-brand-500 text-white rounded-tr-sm'
+                          : 'bg-surface-700 text-surface-100 rounded-tl-sm'
+                      }`}
+                    >
+                      {msg.text}
+                    </div>
+                  </div>
+                );
+              })}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input */}
+            <form onSubmit={handleSendChat} className="flex items-center gap-2 px-3 py-3 border-t border-surface-700 flex-shrink-0">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Type a message…"
+                maxLength={500}
+                className="flex-1 bg-surface-800 border border-surface-700 rounded-xl px-3 py-2 text-white text-sm placeholder-surface-500 focus:border-brand-500 focus:outline-none transition-colors"
+              />
+              <button
+                type="submit"
+                disabled={!chatInput.trim()}
+                className="w-9 h-9 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-colors flex-shrink-0"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
+                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                </svg>
+              </button>
+            </form>
+          </div>
+        )}
       </div>
     </>
   );

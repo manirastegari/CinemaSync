@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cinemasync
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /

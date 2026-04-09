@@ -139,6 +139,22 @@ app.prepare().then(() => {
       io.to(targetId).emit('webrtc:ice', { fromId: socket.id, candidate });
     });
 
+    // ── Text chat ─────────────────────────────────────────────────────────────
+
+    socket.on('chat:message', ({ text }) => {
+      const user = connectedUsers.get(socket.id);
+      if (!user || !text || typeof text !== 'string') return;
+      const trimmed = text.trim().slice(0, 500);
+      if (!trimmed) return;
+      const msg = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        username: user.username,
+        text: trimmed,
+        ts: Date.now(),
+      };
+      io.to('main').emit('chat:message', msg);
+    });
+
     // ── Disconnect ────────────────────────────────────────────────────────────
 
     socket.on('disconnect', () => {
