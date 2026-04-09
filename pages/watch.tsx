@@ -240,6 +240,11 @@ export default function WatchPage() {
       }
     });
 
+    // Kicked off because same account opened on another device
+    socket.on('session:kick', () => {
+      router.push('/?kicked=1');
+    });
+
     socket.on('chat:message', (msg: ChatMessage) => {
       setChatMessages((prev) => [...prev, msg]);
       if (!chatOpenRef.current) setChatUnread((n) => n + 1);
@@ -324,42 +329,12 @@ export default function WatchPage() {
     return pc;
   }
 
-  // ── Auto-request mic on page load ────────────────────────────────────────
-  useEffect(() => {
-    if (!me) return;
-    // Try to get mic immediately (works if permission already granted or desktop)
-    navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    }).then((stream) => {
-      localStreamRef.current = stream;
-      setVoiceActive(true);
-      setMicMuted(false);
-      setVoiceStatus('Mic ready');
-      setTimeout(() => setVoiceStatus(''), 2000);
-      // Add tracks to any existing peer connections
-      for (const [peerId, pc] of peerConnsRef.current.entries()) {
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-        pc.createOffer().then((offer) => {
-          pc.setLocalDescription(offer);
-          socketRef.current?.emit('webrtc:offer', { targetId: peerId, offer });
-        }).catch(() => {});
-      }
-    }).catch(() => {
-      setVoiceStatus('Tap mic button to enable voice');
-      setTimeout(() => setVoiceStatus(''), 3000);
-    });
-  }, [me]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Voice chat toggle ─────────────────────────────────────────────────────
   const handleToggleMic = useCallback(async () => {
     // No local stream yet → start mic for the first time
     if (!localStreamRef.current) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         localStreamRef.current = stream;
         setVoiceActive(true);
         setMicMuted(false);

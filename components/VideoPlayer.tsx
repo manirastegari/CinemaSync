@@ -45,10 +45,10 @@ function detectMode(url: string): VideoMode {
   if (!url) return 'native';
   const u = url.toLowerCase().split('?')[0];
   if (u.endsWith('.m3u8') || u.includes('.m3u8?')) return 'hls';
-  // Known non-browser containers → transcode directly
-  if (/\.(mkv|avi|flv|wmv|ts|m2ts|mov|3gp|divx|vob|rmvb|asf)$/.test(u)) return 'transcode';
-  // Browser-compatible formats (.mp4, .webm, .ogg) OR unknown extension → proxy first
-  // Proxy avoids CORS and follows redirects; browser can play natively through it
+  // Always proxy first: handles CORS, Telegram redirects, and sets correct MIME.
+  // Browser decodes natively (MKV/H.264 works in Chrome/Firefox/Safari;
+  // MKV/H.265 works in Safari). On decode error the error handler falls back
+  // to server-side transcode (requires FFmpeg on the server).
   return 'proxy';
 }
 
@@ -245,13 +245,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         const code = v.error?.code;
         if (code === 4) {
           setVideoError(modeRef.current === 'transcode'
-            ? 'Transcoding failed. The video server may be blocking downloads or the file is corrupted.'
-            : 'Video format not supported by your browser.');
+            ? 'Transcoding failed — the server may be blocking the download or the file is corrupted.'
+            : 'Your browser cannot decode this video. If it\'s an H.265/MKV file, open this page in Safari (macOS or iOS) which supports H.265 natively.');
+        } else if (code === 2) {
+          setVideoError('Network error loading video. Check that the URL is still valid and accessible.');
         } else if (code) {
-          setVideoError(`Video failed to load (error ${code}). Check the URL or network.`);
+          setVideoError(`Video failed to load (error ${code}). Try again or use a different browser.`);
         }
       }],
-      ['fullscreenchange', () => setIsFullscreen(!!document.fullscreenElement)],
+      ['fullscreenchange', () => setIsFullscreen(!!(document.fullscreenElement || (document as any).webkitFullscreenElement))],
+      ['webkitfullscreenchange', () => setIsFullscreen(!!(document.fullscreenElement || (document as any).webkitFullscreenElement))],
     ];
 
     handlers.forEach(([event, fn]) => v.addEventListener(event, fn));
@@ -346,11 +349,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
   function handleFullscreen() {
     const el = containerRef.current;
-    if (!el) return;
-    if (!document.fullscreenElement) {
-      el.requestFullscreen().catch(console.error);
+    const v = videoRef.current;
+    if (!el || !v) return;
+    const isFs = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
+    if (!isFs) {
+      // iOS Safari only supports fullscreen on the <video> element itself
+      if ((v as any).webkitRequestFullscreen) {
+        (v as any).webkitRequestFullscreen();
+      } else {
+        el.requestFullscreen().catch(console.error);
+      }
     } else {
-      document.exitFullscreen().catch(console.error);
+      if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      } else {
+        document.exitFullscreen().catch(console.error);
+      }
     }
   }
 

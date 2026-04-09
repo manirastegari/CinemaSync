@@ -1,4 +1,4 @@
-import { useState, FormEvent } from 'react';
+import { useState, FormEvent, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 
@@ -7,7 +7,13 @@ export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [kicked, setKicked] = useState(false);
+
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (router.query.kicked) setKicked(true);
+  }, [router.query]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -68,7 +74,15 @@ export default function LoginPage() {
 
           {/* Card */}
           <div className="glass-card rounded-2xl p-8">
-            <h1 className="text-xl font-semibold text-white mb-6">Sign in to continue</h1>
+            {kicked && (
+            <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 mb-5">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              </svg>
+              <span className="text-amber-400 text-sm">Signed out — your account was opened on another device.</span>
+            </div>
+          )}
+          <h1 className="text-xl font-semibold text-white mb-6">Sign in to continue</h1>
 
             <form onSubmit={handleSubmit} className="space-y-5">
               <div>

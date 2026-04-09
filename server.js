@@ -21,6 +21,9 @@ let sessionState = {
 // Connected users: socketId -> { username, role, socketId }
 const connectedUsers = new Map();
 
+// One active socket per username (single-device enforcement)
+const usernameSocketMap = new Map(); // username -> socketId
+
 app.prepare().then(() => {
   const httpServer = createServer((req, res) => {
     const parsedUrl = parse(req.url, true);
@@ -35,6 +38,18 @@ app.prepare().then(() => {
   io.on('connection', (socket) => {
     // Client authenticates after connecting
     socket.on('auth', ({ username, role }) => {
+      // Single-device enforcement: kick any existing session for this username
+      const prevSocketId = usernameSocketMap.get(username);
+      if (prevSocketId && prevSocketId !== socket.id) {
+        const prevSocket = io.sockets.sockets.get(prevSocketId);
+        if (prevSocket) {
+          prevSocket.emit('session:kick', { reason: 'Your account was opened on another device.' });
+          prevSocket.disconnect(true);
+        }
+        connectedUsers.delete(prevSocketId);
+      }
+      usernameSocketMap.set(username, socket.id);
+
       connectedUsers.set(socket.id, { username, role, socketId: socket.id });
       socket.join('main');
 
@@ -158,6 +173,10 @@ app.prepare().then(() => {
     // ── Disconnect ────────────────────────────────────────────────────────────
 
     socket.on('disconnect', () => {
+      const user = connectedUsers.get(socket.id);
+      if (user && usernameSocketMap.get(user.username) === socket.id) {
+        usernameSocketMap.delete(user.username);
+      }
       connectedUsers.delete(socket.id);
       io.to('main').emit('room:users', Array.from(connectedUsers.values()));
       io.to('main').emit('webrtc:peer-left', { peerId: socket.id });
