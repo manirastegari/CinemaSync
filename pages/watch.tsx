@@ -124,40 +124,40 @@ export default function WatchPage() {
       setConnectedUsers(users);
     });
 
-    // Admin → user video events
-    if (me.role === 'user') {
-      socket.on('video:play', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
-        const p = playerRef.current;
-        if (!p) return;
-        const elapsed = (Date.now() - timestamp) / 1000;
-        p.seek(currentTime + elapsed);
-        p.play();
-        setSyncStatus('▶ Play');
-        setTimeout(() => setSyncStatus(''), 1500);
-      });
+    // Video sync events — ALL parties receive these (any user can control playback)
+    socket.on('video:play', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
+      isPlayingRef.current = true;
+      const p = playerRef.current;
+      if (!p) return;
+      const elapsed = (Date.now() - timestamp) / 1000;
+      p.seek(currentTime + elapsed);
+      p.play();
+      setSyncStatus('▶ Play');
+      setTimeout(() => setSyncStatus(''), 1500);
+    });
 
-      socket.on('video:pause', ({ currentTime }: { currentTime: number }) => {
-        const p = playerRef.current;
-        if (!p) return;
-        p.seek(currentTime);
-        p.pause();
-        setSyncStatus('⏸ Pause');
-        setTimeout(() => setSyncStatus(''), 1500);
-      });
+    socket.on('video:pause', ({ currentTime }: { currentTime: number }) => {
+      isPlayingRef.current = false;
+      const p = playerRef.current;
+      if (!p) return;
+      p.seek(currentTime);
+      p.pause();
+      setSyncStatus('⏸ Pause');
+      setTimeout(() => setSyncStatus(''), 1500);
+    });
 
-      socket.on('video:seek', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
-        const p = playerRef.current;
-        if (!p) return;
-        const elapsed = (Date.now() - timestamp) / 1000;
-        p.seek(currentTime + elapsed * 0.5);
-        setSyncStatus('⏩ Seek');
-        setTimeout(() => setSyncStatus(''), 1500);
-      });
+    socket.on('video:seek', ({ currentTime, timestamp }: { currentTime: number; timestamp: number }) => {
+      const p = playerRef.current;
+      if (!p) return;
+      const elapsed = (Date.now() - timestamp) / 1000;
+      p.seek(currentTime + elapsed * 0.5);
+      setSyncStatus('⏩ Seek');
+      setTimeout(() => setSyncStatus(''), 1500);
+    });
 
-      // Periodic heartbeat sync — correct drift if > 5s out of sync
+    // Periodic heartbeat sync (only non-admin users sync to admin)
+    if (me.role !== 'admin') {
       socket.on('video:heartbeat', ({ currentTime: adminTime, isPlaying: adminPlaying }: { currentTime: number; isPlaying?: boolean }) => {
-        // Skip sync entirely when admin is paused or hasn't started — avoids
-        // the 10-15 s rewind loop caused by heartbeat sending t=0.
         if (!adminPlaying) return;
         const p = playerRef.current;
         if (!p) return;
@@ -170,16 +170,16 @@ export default function WatchPage() {
       });
     }
 
-    // WebRTC: admin calls a peer (fresh PC every time, audio track included if mic is on)
+    // WebRTC: admin calls a peer — reuse existing PC when possible (faster renegotiation)
     socket.on('webrtc:peer-joined', async ({ peerId, username: peerName }: { peerId: string; username: string }) => {
       setVoiceStatus(`Connecting voice with ${peerName}…`);
 
-      // Always close any existing PC for this peer and start fresh
-      const existing = peerConnsRef.current.get(peerId);
-      if (existing) { try { existing.close(); } catch {} peerConnsRef.current.delete(peerId); }
-
-      const pc = createPeerConnection(peerId, socket);
-      peerConnsRef.current.set(peerId, pc);
+      let pc = peerConnsRef.current.get(peerId);
+      if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        if (pc) { try { pc.close(); } catch {} }
+        pc = createPeerConnection(peerId, socket);
+        peerConnsRef.current.set(peerId, pc);
+      }
 
       try {
         const offer = await pc.createOffer({ offerToReceiveAudio: true });
@@ -191,14 +191,18 @@ export default function WatchPage() {
     });
 
     socket.on('webrtc:offer', async ({ fromId, offer }: { fromId: string; offer: RTCSessionDescriptionInit }) => {
-      // Always create a fresh PC so we can include our mic track if we have one
-      const existing = peerConnsRef.current.get(fromId);
-      if (existing) { try { existing.close(); } catch {} peerConnsRef.current.delete(fromId); }
-
-      const pc = createPeerConnection(fromId, socket);
-      peerConnsRef.current.set(fromId, pc);
+      let pc = peerConnsRef.current.get(fromId);
+      if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        if (pc) { try { pc.close(); } catch {} }
+        pc = createPeerConnection(fromId, socket);
+        peerConnsRef.current.set(fromId, pc);
+      }
 
       try {
+        // Handle renegotiation glare: rollback if not in stable state
+        if (pc.signalingState !== 'stable') {
+          await pc.setLocalDescription({ type: 'rollback' });
+        }
         await pc.setRemoteDescription(offer);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -326,7 +330,7 @@ export default function WatchPage() {
 
   // ── Voice chat toggle ─────────────────────────────────────────────────────
   const handleToggleMic = useCallback(async () => {
-    // No local stream yet → request mic and restart WebRTC fresh with audio
+    // No local stream yet → request mic, add track to existing PCs, renegotiate
     if (!localStreamRef.current) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -335,10 +339,11 @@ export default function WatchPage() {
         setMicMuted(false);
         setVoiceStatus('Mic on — connecting…');
 
-        // Close all existing PCs (they were built without audio) and restart via server
-        peerConnsRef.current.forEach((pc) => { try { pc.close(); } catch {} });
-        peerConnsRef.current.clear();
-        // Signal server: I have a mic now — triggers fresh peer-joined on the admin side
+        // Add mic track to any existing peer connections (ICE is already warm)
+        for (const [, pc] of peerConnsRef.current.entries()) {
+          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        }
+        // Signal server to trigger renegotiation (admin sends fresh offer)
         socketRef.current?.emit('webrtc:user-ready');
         setTimeout(() => setVoiceStatus(''), 2000);
       } catch (err: unknown) {
@@ -525,9 +530,7 @@ export default function WatchPage() {
 
             {/* Keyboard shortcuts hint */}
             <div className="text-surface-600 text-xs hidden sm:block">
-              {me.role === 'admin'
-                ? 'Space/K · ← → seek · ↑↓ volume · F fullscreen'
-                : '↑↓ volume · F fullscreen · M mute'}
+              Space/K · ← → seek · ↑↓ volume · F fullscreen · M mute
             </div>
           </div>
 

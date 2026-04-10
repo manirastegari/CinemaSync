@@ -280,13 +280,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         case ' ':
         case 'k':
           e.preventDefault();
-          if (isAdmin) { v.paused ? handlePlay() : handlePause(); }
+          v.paused ? handlePlay() : handlePause();
           break;
         case 'ArrowRight':
-          if (isAdmin) { e.preventDefault(); handleSkip(10); }
+          e.preventDefault(); handleSkip(10);
           break;
         case 'ArrowLeft':
-          if (isAdmin) { e.preventDefault(); handleSkip(-10); }
+          e.preventDefault(); handleSkip(-10);
           break;
         case 'ArrowUp':
           e.preventDefault();
@@ -400,7 +400,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         style={{ transform: `rotate(${rotation}deg)` }}
         playsInline
         preload="metadata"
-        onDoubleClick={isAdmin ? (playing ? handlePause : handlePlay) : undefined}
+        onClick={resetControlsTimer}
+        onDoubleClick={playing ? handlePause : handlePlay}
       />
 
       {/* Buffering / Transcoding overlay */}
@@ -424,6 +425,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         </div>
       )}
 
+      {/* Tap to unmute — shown when autoplay policy forced mute */}
+      {playing && muted && (
+        <button
+          onClick={() => {
+            const v = videoRef.current;
+            if (v) { v.muted = false; setMuted(false); }
+          }}
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-black/70 backdrop-blur-sm border border-white/10 rounded-full px-4 py-2 text-white text-sm font-medium shadow-lg hover:bg-black/80 transition-colors"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+          </svg>
+          Tap to unmute
+        </button>
+      )}
+
       {/* No source */}
       {!src && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black text-center px-6">
@@ -439,7 +456,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
       {/* Top gradient + info bar */}
       <div
-        className={`absolute top-0 left-0 right-0 player-gradient-top transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute top-0 left-0 right-0 z-10 player-gradient-top transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
         style={{ paddingTop: '2px', paddingBottom: '40px' }}
       >
         <div className="flex items-center justify-between px-4 pt-3">
@@ -511,7 +528,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
       {/* Bottom controls */}
       <div
-        className={`absolute bottom-0 left-0 right-0 player-gradient-bottom transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute bottom-0 left-0 right-0 z-10 player-gradient-bottom transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
         style={{ paddingTop: '60px' }}
       >
         {/* Progress bar */}
@@ -535,11 +552,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
               max={effectiveDuration || 100}
               step={0.1}
               value={Math.min(currentTime, effectiveDuration || 100)}
-              disabled={!isAdmin}
               onChange={(e) => handleSeek(parseFloat(e.target.value))}
               style={{
                 background: 'transparent',
-                cursor: isAdmin ? 'pointer' : 'default',
+                cursor: 'pointer',
               }}
             />
           </div>
@@ -547,55 +563,43 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
         {/* Controls row */}
         <div className="flex items-center px-4 pb-4 gap-2">
-          {/* Skip back (admin only) */}
-          {isAdmin && (
-            <button
-              onClick={() => handleSkip(-10)}
-              className="text-white/80 hover:text-white transition-colors tooltip"
-              data-tip="-10s"
-            >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/>
-              </svg>
-            </button>
-          )}
+          {/* Skip back */}
+          <button
+            onClick={() => handleSkip(-10)}
+            className="text-white/80 hover:text-white transition-colors tooltip"
+            data-tip="-10s"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/>
+            </svg>
+          </button>
 
-          {/* Play/Pause (admin only) */}
-          {isAdmin ? (
-            <button
-              onClick={playing ? handlePause : handlePlay}
-              className="text-white hover:text-brand-400 transition-colors w-10 h-10 flex items-center justify-center"
-            >
-              {playing ? (
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-                </svg>
-              ) : (
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18c.62-.39.62-1.29 0-1.69L9.54 5.98C8.87 5.55 8 6.03 8 6.82z"/>
-                </svg>
-              )}
-            </button>
-          ) : (
-            <div className="w-10 h-10 flex items-center justify-center">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="rgba(255,255,255,0.3)">
+          {/* Play/Pause */}
+          <button
+            onClick={playing ? handlePause : handlePlay}
+            className="text-white hover:text-brand-400 transition-colors w-10 h-10 flex items-center justify-center"
+          >
+            {playing ? (
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+              </svg>
+            ) : (
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18c.62-.39.62-1.29 0-1.69L9.54 5.98C8.87 5.55 8 6.03 8 6.82z"/>
               </svg>
-            </div>
-          )}
+            )}
+          </button>
 
-          {/* Skip forward (admin only) */}
-          {isAdmin && (
-            <button
-              onClick={() => handleSkip(10)}
-              className="text-white/80 hover:text-white transition-colors tooltip"
-              data-tip="+10s"
-            >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/>
-              </svg>
-            </button>
-          )}
+          {/* Skip forward */}
+          <button
+            onClick={() => handleSkip(10)}
+            className="text-white/80 hover:text-white transition-colors tooltip"
+            data-tip="+10s"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/>
+            </svg>
+          </button>
 
           {/* Volume */}
           <button
@@ -639,38 +643,36 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
 
           <div className="flex-1" />
 
-          {/* Speed (admin only) */}
-          {isAdmin && (
-            <div className="relative">
-              <button
-                onClick={() => setShowSpeedMenu((s) => !s)}
-                className="text-white/70 hover:text-white text-xs font-medium px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
-              >
-                {speed}×
-              </button>
-              {showSpeedMenu && (
-                <div className="absolute bottom-full right-0 mb-2 bg-surface-800 border border-surface-700 rounded-xl overflow-hidden shadow-xl animate-slide-up">
-                  {speeds.map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => {
-                        if (videoRef.current) videoRef.current.playbackRate = s;
-                        setSpeed(s);
-                        setShowSpeedMenu(false);
-                      }}
-                      className={`block w-full text-left px-4 py-2 text-sm transition-colors ${
-                        speed === s
-                          ? 'bg-brand-500 text-white'
-                          : 'text-surface-200 hover:bg-surface-700'
-                      }`}
-                    >
-                      {s}×
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+          {/* Speed */}
+          <div className="relative">
+            <button
+              onClick={() => setShowSpeedMenu((s) => !s)}
+              className="text-white/70 hover:text-white text-xs font-medium px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
+            >
+              {speed}×
+            </button>
+            {showSpeedMenu && (
+              <div className="absolute bottom-full right-0 mb-2 bg-surface-800 border border-surface-700 rounded-xl overflow-hidden shadow-xl animate-slide-up">
+                {speeds.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => {
+                      if (videoRef.current) videoRef.current.playbackRate = s;
+                      setSpeed(s);
+                      setShowSpeedMenu(false);
+                    }}
+                    className={`block w-full text-left px-4 py-2 text-sm transition-colors ${
+                      speed === s
+                        ? 'bg-brand-500 text-white'
+                        : 'text-surface-200 hover:bg-surface-700'
+                    }`}
+                  >
+                    {s}×
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Rotate (user side especially useful on mobile) */}
           <button
@@ -702,13 +704,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         </div>
       </div>
 
-      {/* Non-admin overlay: click anywhere to show controls */}
-      {!isAdmin && (
-        <div
-          className="absolute inset-0 z-0"
-          onClick={resetControlsTimer}
-        />
-      )}
     </div>
   );
 });
