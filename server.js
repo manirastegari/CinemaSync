@@ -37,7 +37,12 @@ app.prepare().then(() => {
 
   io.on('connection', (socket) => {
     // Client authenticates after connecting
-    socket.on('auth', ({ username, role }) => {
+    socket.on('auth', ({ username, role, page }) => {
+      // Admin-dashboard sockets (admin.tsx) must NOT join 'main' or trigger
+      // single-device enforcement — otherwise navigating to /admin kicks the
+      // /watch socket and redirects the admin to the login page.
+      if (page === 'admin-dashboard') return;
+
       // Single-device enforcement: kick any existing session for this username
       const prevSocketId = usernameSocketMap.get(username);
       if (prevSocketId && prevSocketId !== socket.id) {
@@ -96,9 +101,10 @@ app.prepare().then(() => {
     });
 
     // Admin periodic heartbeat — broadcast to users for live sync
-    socket.on('video:heartbeat', ({ currentTime }) => {
+    socket.on('video:heartbeat', ({ currentTime, isPlaying }) => {
       sessionState = { ...sessionState, currentTime, timestamp: Date.now() };
-      socket.to('main').emit('video:heartbeat', { currentTime, timestamp: sessionState.timestamp });
+      // Include isPlaying so users skip the sync when admin is paused / not started
+      socket.to('main').emit('video:heartbeat', { currentTime, isPlaying: isPlaying ?? sessionState.isPlaying, timestamp: sessionState.timestamp });
     });
 
     // Let any client request current state (useful after mic permission grant / late join)
@@ -195,7 +201,9 @@ app.prepare().then(() => {
 
     socket.on('disconnect', () => {
       const user = connectedUsers.get(socket.id);
-      if (user && usernameSocketMap.get(user.username) === socket.id) {
+      // Admin-dashboard sockets are not in connectedUsers — skip broadcast
+      if (!user) return;
+      if (usernameSocketMap.get(user.username) === socket.id) {
         usernameSocketMap.delete(user.username);
       }
       connectedUsers.delete(socket.id);

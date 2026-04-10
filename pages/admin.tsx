@@ -56,7 +56,7 @@ export default function AdminPage() {
         const socket = io({ transports: ['websocket', 'polling'] });
         socketRef.current = socket;
         socket.on('connect', () => {
-          socket.emit('auth', { username: data.username, role: data.role });
+          socket.emit('auth', { username: data.username, role: data.role, page: 'admin-dashboard' });
         });
       })
       .catch(() => router.push('/'));

@@ -65,6 +65,7 @@ export default function WatchPage() {
   const playerRef = useRef<VideoPlayerHandle>(null);
   const socketRef = useRef<Socket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const isPlayingRef = useRef(false); // tracks whether admin's video is playing (for heartbeat)
   const peerConnsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -154,7 +155,10 @@ export default function WatchPage() {
       });
 
       // Periodic heartbeat sync — correct drift if > 5s out of sync
-      socket.on('video:heartbeat', ({ currentTime: adminTime }: { currentTime: number }) => {
+      socket.on('video:heartbeat', ({ currentTime: adminTime, isPlaying: adminPlaying }: { currentTime: number; isPlaying?: boolean }) => {
+        // Skip sync entirely when admin is paused or hasn't started — avoids
+        // the 10-15 s rewind loop caused by heartbeat sending t=0.
+        if (!adminPlaying) return;
         const p = playerRef.current;
         if (!p) return;
         const myTime = p.getCurrentTime();
@@ -247,7 +251,7 @@ export default function WatchPage() {
     if (me.role === 'admin') {
       heartbeatRef.current = setInterval(() => {
         const t = playerRef.current?.getCurrentTime() ?? 0;
-        socket.emit('video:heartbeat', { currentTime: t });
+        socket.emit('video:heartbeat', { currentTime: t, isPlaying: isPlayingRef.current });
       }, 5000);
     }
 
@@ -386,10 +390,12 @@ export default function WatchPage() {
 
   // ── Admin video event emitters ────────────────────────────────────────────
   const handlePlay = useCallback((currentTime: number) => {
+    isPlayingRef.current = true;
     socketRef.current?.emit('video:play', { currentTime });
   }, []);
 
   const handlePause = useCallback((currentTime: number) => {
+    isPlayingRef.current = false;
     socketRef.current?.emit('video:pause', { currentTime });
   }, []);
 
