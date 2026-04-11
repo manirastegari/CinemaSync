@@ -82,6 +82,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   const timeOffsetRef = useRef(0);       // seek offset for transcode mode
   const seekingRef = useRef(false);      // true while changing src for server-side seek
   const fallbackTriedRef = useRef(false); // true after proxy→transcode fallback
+  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recoveryRef = useRef(0);           // stall recovery attempt counter
 
   const [playing, setPlaying] = useState(false);
   const [transcoding, setTranscoding] = useState(false);
@@ -161,6 +163,48 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     }, 3000);
   }, [playing]);
 
+  // ── Stall detection & auto-recovery ───────────────────────────────────
+  function clearStallTimer() {
+    if (stallTimerRef.current) { clearTimeout(stallTimerRef.current); stallTimerRef.current = null; }
+    recoveryRef.current = 0;
+  }
+
+  function stallRecovery() {
+    stallTimerRef.current = null;
+    const v = videoRef.current;
+    if (!v || v.paused) return;              // intentionally paused — skip
+
+    recoveryRef.current++;
+    if (recoveryRef.current <= 2) {
+      // Nudge: tiny seek triggers a fresh HTTP range request
+      console.log(`[VideoPlayer] stall recovery #${recoveryRef.current}: nudging`);
+      v.currentTime += 0.1;
+      stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+    } else {
+      // Full reload at the same position
+      console.log('[VideoPlayer] stall recovery: reloading source');
+      recoveryRef.current = 0;
+      const realTime = v.currentTime + timeOffsetRef.current;
+      seekingRef.current = true;
+      if (modeRef.current === 'transcode') {
+        timeOffsetRef.current = realTime;
+        v.src = streamUrl(rawSrcRef.current, realTime);
+      } else if (modeRef.current === 'proxy') {
+        v.src = proxyUrl(rawSrcRef.current);
+      } else {
+        v.src = rawSrcRef.current;
+      }
+      v.load();
+      const onReady = () => {
+        seekingRef.current = false;
+        if (modeRef.current !== 'transcode') v.currentTime = realTime;
+        v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+        v.removeEventListener('canplay', onReady);
+      };
+      v.addEventListener('canplay', onReady);
+    }
+  }
+
   // ── Format handling ─────────────────────────────────────────────────────
   useEffect(() => {
     const v = videoRef.current;
@@ -175,6 +219,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
     fallbackTriedRef.current = false;
+    clearStallTimer();
 
     if (mode === 'hls') {
       import('hls.js').then(({ default: HlsLib }) => {
@@ -219,9 +264,20 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['durationchange', () => setDuration(v.duration)],
       ['play', () => setPlaying(true)],
       ['pause', () => setPlaying(false)],
-      ['waiting', () => setBuffering(true)],
-      ['playing', () => setBuffering(false)],
-      ['canplay', () => setBuffering(false)],
+      ['waiting', () => {
+        setBuffering(true);
+        // Start stall recovery timer — if still stuck after 8s, try auto-fix
+        if (!stallTimerRef.current) {
+          stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+        }
+      }],
+      ['stalled', () => {
+        if (!stallTimerRef.current) {
+          stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+        }
+      }],
+      ['playing', () => { setBuffering(false); clearStallTimer(); }],
+      ['canplay', () => { setBuffering(false); clearStallTimer(); }],
       ['error', () => {
         if (seekingRef.current) return;    // ignore errors during server-side seek transition
 
@@ -258,7 +314,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     ];
 
     handlers.forEach(([event, fn]) => v.addEventListener(event, fn));
-    return () => handlers.forEach(([event, fn]) => v.removeEventListener(event, fn));
+    return () => {
+      handlers.forEach(([event, fn]) => v.removeEventListener(event, fn));
+      clearStallTimer();
+    };
   }, [onTimeUpdate]);
 
   useEffect(() => {
