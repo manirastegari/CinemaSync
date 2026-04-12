@@ -68,6 +68,8 @@ export default function WatchPage() {
   const isPlayingRef = useRef(false); // tracks whether admin's video is playing (for heartbeat)
   const peerConnsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastHeartbeatTimeRef = useRef(0);   // detect stalls in heartbeat emitter
+  const seekTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatOpenRef = useRef(false);
 
@@ -99,7 +101,8 @@ export default function WatchPage() {
       setConnectedUsers(state.users);
       if (state.videoDuration) setVideoDuration(state.videoDuration);
 
-      if (me.role === 'user' && state.videoUrl) {
+      // Sync BOTH roles on join / reconnect / URL change
+      if (state.videoUrl) {
         const elapsed = (Date.now() - state.timestamp) / 1000;
         const targetTime = state.isPlaying ? state.currentTime + elapsed : state.currentTime;
 
@@ -108,7 +111,8 @@ export default function WatchPage() {
           const p = playerRef.current;
           if (!p) return;
           if (targetTime > 1) p.seek(targetTime);
-          if (state.isPlaying) p.play(); else p.pause();
+          if (state.isPlaying) { isPlayingRef.current = true; p.play(); }
+          else { isPlayingRef.current = false; p.pause(); }
           setSyncStatus('Synced');
           setTimeout(() => setSyncStatus(''), 2000);
         }, 1500);
@@ -155,20 +159,21 @@ export default function WatchPage() {
       setTimeout(() => setSyncStatus(''), 1500);
     });
 
-    // Periodic heartbeat sync (only non-admin users sync to admin)
-    if (me.role !== 'admin') {
-      socket.on('video:heartbeat', ({ currentTime: adminTime, isPlaying: adminPlaying }: { currentTime: number; isPlaying?: boolean }) => {
-        if (!adminPlaying) return;
-        const p = playerRef.current;
-        if (!p) return;
-        const myTime = p.getCurrentTime();
-        if (Math.abs(myTime - adminTime) > 5) {
-          p.seek(adminTime);
-          setSyncStatus('Re-synced');
-          setTimeout(() => setSyncStatus(''), 1500);
-        }
-      });
-    }
+    // Bidirectional heartbeat sync — both parties correct drift > 2 s
+    socket.on('video:heartbeat', ({ currentTime: peerTime, isPlaying: peerPlaying, timestamp: ts }: { currentTime: number; isPlaying?: boolean; timestamp?: number }) => {
+      if (!peerPlaying) return;            // peer is paused / stuck — don’t sync
+      if (!isPlayingRef.current) return;   // I’m paused — don’t force-play me
+      const p = playerRef.current;
+      if (!p) return;
+      const elapsed = ts ? (Date.now() - ts) / 1000 : 0;
+      const adjustedPeerTime = peerTime + elapsed;
+      const myTime = p.getCurrentTime();
+      if (Math.abs(myTime - adjustedPeerTime) > 2) {
+        p.seek(adjustedPeerTime);
+        setSyncStatus('Re-synced');
+        setTimeout(() => setSyncStatus(''), 1500);
+      }
+    });
 
     // WebRTC: admin calls a peer — reuse existing PC when possible (faster renegotiation)
     socket.on('webrtc:peer-joined', async ({ peerId, username: peerName }: { peerId: string; username: string }) => {
@@ -251,17 +256,21 @@ export default function WatchPage() {
       setTimeout(() => setVoiceStatus(''), 2000);
     });
 
-    // Admin heartbeat (periodic time sync for users)
-    if (me.role === 'admin') {
-      heartbeatRef.current = setInterval(() => {
-        const t = playerRef.current?.getCurrentTime() ?? 0;
-        socket.emit('video:heartbeat', { currentTime: t, isPlaying: isPlayingRef.current });
-      }, 5000);
-    }
+    // Both parties emit heartbeats every 2 s for bidirectional sync
+    lastHeartbeatTimeRef.current = 0;
+    heartbeatRef.current = setInterval(() => {
+      const t = playerRef.current?.getCurrentTime() ?? 0;
+      // Detect stall: if time hasn’t advanced, report not-actually-playing
+      const delta = Math.abs(t - lastHeartbeatTimeRef.current);
+      const actuallyPlaying = isPlayingRef.current && delta > 0.3;
+      lastHeartbeatTimeRef.current = t;
+      socket.emit('video:heartbeat', { currentTime: t, isPlaying: actuallyPlaying });
+    }, 2000);
 
     return () => {
       socket.disconnect();
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
       peerConnsRef.current.forEach((pc) => pc.close());
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
@@ -405,7 +414,11 @@ export default function WatchPage() {
   }, []);
 
   const handleSeek = useCallback((currentTime: number) => {
-    socketRef.current?.emit('video:seek', { currentTime });
+    // Debounce: only emit after user stops dragging for 300 ms
+    if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
+    seekTimeoutRef.current = setTimeout(() => {
+      socketRef.current?.emit('video:seek', { currentTime });
+    }, 300);
   }, []);
 
   const handleLogout = async () => {

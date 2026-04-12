@@ -179,7 +179,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       // Nudge: tiny seek triggers a fresh HTTP range request
       console.log(`[VideoPlayer] stall recovery #${recoveryRef.current}: nudging`);
       v.currentTime += 0.1;
-      stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+      stallTimerRef.current = setTimeout(() => stallRecovery(), 5000);
     } else {
       // Full reload at the same position
       console.log('[VideoPlayer] stall recovery: reloading source');
@@ -266,14 +266,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['pause', () => setPlaying(false)],
       ['waiting', () => {
         setBuffering(true);
-        // Start stall recovery timer — if still stuck after 8s, try auto-fix
+        // Start stall recovery timer — if still stuck after 5s, try auto-fix
         if (!stallTimerRef.current) {
-          stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+          stallTimerRef.current = setTimeout(() => stallRecovery(), 5000);
         }
       }],
       ['stalled', () => {
         if (!stallTimerRef.current) {
-          stallTimerRef.current = setTimeout(() => stallRecovery(), 8000);
+          stallTimerRef.current = setTimeout(() => stallRecovery(), 5000);
         }
       }],
       ['playing', () => { setBuffering(false); clearStallTimer(); }],
