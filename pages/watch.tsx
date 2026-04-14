@@ -70,6 +70,7 @@ export default function WatchPage() {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastHeartbeatTimeRef = useRef(0);   // detect stalls in heartbeat emitter
   const seekTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevUserCountRef = useRef(0);       // detect partner leaving
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatOpenRef = useRef(false);
 
@@ -125,6 +126,17 @@ export default function WatchPage() {
     });
 
     socket.on('room:users', (users: ConnectedUser[]) => {
+      const prevCount = prevUserCountRef.current;
+      prevUserCountRef.current = users.length;
+
+      // Someone left while movie was playing → pause for remaining user
+      if (prevCount > 1 && users.length < prevCount && isPlayingRef.current) {
+        isPlayingRef.current = false;
+        playerRef.current?.pause();
+        setSyncStatus('⏸ Partner left — paused');
+        setTimeout(() => setSyncStatus(''), 4000);
+      }
+
       setConnectedUsers(users);
     });
 
