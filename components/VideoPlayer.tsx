@@ -45,11 +45,10 @@ function detectMode(url: string): VideoMode {
   if (!url) return 'native';
   const u = url.toLowerCase().split('?')[0];
   if (u.endsWith('.m3u8') || u.includes('.m3u8?')) return 'hls';
-  // Always proxy first: handles CORS, Telegram redirects, and sets correct MIME.
-  // Browser decodes natively (MKV/H.264 works in Chrome/Firefox/Safari;
-  // MKV/H.265 works in Safari). On decode error the error handler falls back
-  // to server-side transcode (requires FFmpeg on the server).
-  return 'proxy';
+  // Try native (direct) first — each client downloads the video independently,
+  // keeping server bandwidth near zero.  On CORS / decode error the error
+  // handler falls back to proxy, then to server-side transcode.
+  return 'native';
 }
 
 function proxyUrl(rawUrl: string): string {
@@ -281,7 +280,21 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       ['error', () => {
         if (seekingRef.current) return;    // ignore errors during server-side seek transition
 
-        // Fallback: proxy failed → try transcode (browser can't play this format natively)
+        // Fallback chain: native → proxy → transcode
+        if (modeRef.current === 'native' && !fallbackTriedRef.current) {
+          console.log('[VideoPlayer] native (direct) failed — falling back to proxy');
+          modeRef.current = 'proxy';
+          setVideoError('');
+          v.src = proxyUrl(rawSrcRef.current);
+          v.load();
+          const onReady = () => {
+            v.play().catch(() => { v.muted = true; setMuted(true); v.play().catch(() => {}); });
+            v.removeEventListener('canplay', onReady);
+          };
+          v.addEventListener('canplay', onReady);
+          return;
+        }
+
         if (modeRef.current === 'proxy' && !fallbackTriedRef.current) {
           console.log('[VideoPlayer] proxy mode failed — falling back to transcode');
           fallbackTriedRef.current = true;
